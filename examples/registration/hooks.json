@@ -1,0 +1,64 @@
+[
+  {
+    "id": "hook.user.registered-notify",
+    "name": "notifyOnUserRegistered",
+    "type": "hook",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Sends a verification email after successful registration. Notification failures must not fail the flow.",
+    "execution": { "target": "frontend", "mode": "async" },
+    "definition": {
+      "trigger": { "event": "user.registered" },
+      "order": 10,
+      "handlers": [
+        {
+          "type": "function",
+          "ref": "function.notification.send-verification",
+          "args": { "userId": "$.payload.userId", "email": "$.payload.email" }
+        }
+      ],
+      "execution": { "mode": "sequential", "stopOnError": false }
+    }
+  },
+  {
+    "id": "hook.form.before-submit",
+    "name": "beforeSubmitForm",
+    "type": "hook",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Form Builder submits via the form.submit event; this hook runs the registration flow.",
+    "execution": { "target": "shared", "mode": "async" },
+    "definition": {
+      "trigger": { "event": "form.submit" },
+      "order": 0,
+      "handlers": [
+        { "type": "flow", "ref": "flow.user.registration", "input": "$.payload.values" }
+      ],
+      "execution": { "mode": "sequential", "stopOnError": true }
+    }
+  },
+  {
+    "id": "hook.app.start",
+    "name": "onAppStart",
+    "type": "hook",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Application lifecycle hook dispatched by the Expo adapter (useAppLifecycle).",
+    "execution": { "target": "frontend", "mode": "async" },
+    "definition": {
+      "trigger": { "event": "app.start" },
+      "order": 0,
+      "handlers": [
+        {
+          "type": "flow",
+          "ref": "flow.order.quote",
+          "args": {
+            "items": [{ "price": 10 }, { "price": 5 }],
+            "taxRate": 0
+          }
+        }
+      ],
+      "execution": { "mode": "sequential", "stopOnError": false }
+    }
+  }
+]
