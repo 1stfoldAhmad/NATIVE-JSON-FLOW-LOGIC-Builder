@@ -1,0 +1,159 @@
+[
+  {
+    "id": "function.user.validate-email",
+    "name": "validateEmail",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Predicate: checks that an email address is well-formed",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "kind": "predicate",
+      "parameters": [
+        { "name": "email", "type": "string", "required": true }
+      ],
+      "return": { "name": "valid", "type": "boolean" },
+      "expression": {
+        "operator": "and",
+        "arguments": [
+          { "operator": "matches", "arguments": ["$.email", "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"] },
+          { "operator": "lte", "arguments": [{ "operator": "length", "arguments": ["$.email"] }, 254] }
+        ]
+      }
+    }
+  },
+  {
+    "id": "function.user.validate-password",
+    "name": "validatePassword",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Validator: returns { valid, errors } for a password",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "kind": "validator",
+      "parameters": [
+        { "name": "password", "type": "string", "required": true }
+      ],
+      "return": { "name": "result", "type": "object" },
+      "expression": {
+        "operator": "if",
+        "arguments": [
+          {
+            "operator": "and",
+            "arguments": [
+              { "operator": "gte", "arguments": [{ "operator": "length", "arguments": ["$.password"] }, 8] },
+              { "operator": "matches", "arguments": ["$.password", "[0-9]"] }
+            ]
+          },
+          { "valid": true, "errors": [] },
+          { "valid": false, "errors": ["Password must be at least 8 characters and contain a digit"] }
+        ]
+      }
+    }
+  },
+  {
+    "id": "function.user.normalize-email",
+    "name": "normalizeEmail",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Transform: trims and lowercases an email address",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "kind": "transform",
+      "parameters": [
+        { "name": "email", "type": "string", "required": true }
+      ],
+      "return": { "name": "email", "type": "string" },
+      "expression": {
+        "operator": "lower",
+        "arguments": [{ "operator": "trim", "arguments": ["$.email"] }]
+      }
+    }
+  },
+  {
+    "id": "function.order.calculate-total",
+    "name": "calculateTotal",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Pure: order total = sum(items.price) * (1 + taxRate)",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "kind": "pure",
+      "parameters": [
+        { "name": "items", "type": "array", "required": true },
+        { "name": "taxRate", "type": "number", "default": 0 }
+      ],
+      "return": { "name": "total", "type": "number" },
+      "expression": {
+        "operator": "add",
+        "arguments": [
+          { "operator": "sum", "value": "$.items[*].price" },
+          {
+            "operator": "multiply",
+            "arguments": [
+              { "operator": "sum", "value": "$.items[*].price" },
+              "$.taxRate"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "function.user-api.find-by-email",
+    "name": "findUserByEmail",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Native (API adapter): find a user by email. Registered by the app.",
+    "execution": { "target": "frontend", "mode": "async", "capabilities": ["api.read"] },
+    "definition": {
+      "kind": "native",
+      "native": "userApi.findByEmail",
+      "parameters": [
+        { "name": "email", "type": "string", "required": true }
+      ],
+      "return": { "name": "user", "type": "object", "nullable": true }
+    }
+  },
+  {
+    "id": "function.user-api.create-user",
+    "name": "createUser",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Native (API adapter): create a user account. Registered by the app.",
+    "execution": { "target": "frontend", "mode": "async", "capabilities": ["api.write"] },
+    "definition": {
+      "kind": "native",
+      "native": "userApi.createUser",
+      "parameters": [
+        { "name": "name", "type": "string", "required": true },
+        { "name": "email", "type": "string", "required": true },
+        { "name": "password", "type": "string", "required": true }
+      ],
+      "return": { "name": "user", "type": "object" }
+    }
+  },
+  {
+    "id": "function.notification.send-verification",
+    "name": "sendVerification",
+    "type": "function",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Native (API adapter): send an email verification. Registered by the app.",
+    "execution": { "target": "frontend", "mode": "async", "capabilities": ["notification.send"] },
+    "definition": {
+      "kind": "native",
+      "native": "notification.sendVerification",
+      "parameters": [
+        { "name": "userId", "type": "string", "required": true },
+        { "name": "email", "type": "string", "required": true }
+      ],
+      "return": { "name": "receipt", "type": "object" }
+    }
+  }
+]

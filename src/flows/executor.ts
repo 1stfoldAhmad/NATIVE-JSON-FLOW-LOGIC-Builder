@@ -90,6 +90,9 @@ export class FlowEngine {
         signal: ac.signal,
         parentExecutionId: opts.parentExecutionId,
         budget,
+        // F-08: a flow's own maxNodeExecutions is a LOCAL limit; the strictest
+        // of the shared inherited budget and this local limit is enforced.
+        nodeBudget: flow.definition.limits?.maxNodeExecutions ?? DEFAULT_NODE_BUDGET,
         engine: this.engine,
         tracer: this.engine.tracer.enabled || opts.trace ? this.engine.tracer : undefined,
       });
@@ -189,10 +192,16 @@ export class FlowEngine {
   }
 
   private spendBudget(ctx: ExecutionContext): void {
+    // Shared (inherited) budget across the whole execution tree...
     ctx.budget.remaining -= 1;
-    if (ctx.budget.remaining < 0) {
+    // ...and this execution's own local limit — the strictest one wins.
+    ctx.localSpent += 1;
+    if (ctx.budget.remaining < 0 || ctx.localSpent > ctx.localNodeLimit) {
       throw new VdsError(ErrorCodes.EXEC_LIMIT, "Flow node execution budget exceeded (possible runaway loop or event recursion)", {
         executionId: ctx.executionId,
+        remaining: ctx.budget.remaining,
+        localSpent: ctx.localSpent,
+        localNodeLimit: ctx.localNodeLimit,
       });
     }
   }
@@ -351,6 +360,9 @@ export class FlowEngine {
           signal: ctx.signal,
           parentExecutionId: ctx.executionId,
           budget: ctx.budget, // shared budget across the execution tree
+          // F-04: inherit explicitly permitted context namespaces
+          user: ctx.user,
+          environment: ctx.environment,
         });
         if (!res.success) {
           throw new VdsError(res.error!.code, res.error!.message, res.error!.details);

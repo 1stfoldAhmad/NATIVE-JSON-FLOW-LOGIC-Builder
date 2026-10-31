@@ -1,0 +1,76 @@
+[
+  {
+    "id": "class.user-service",
+    "name": "UserService",
+    "type": "class",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Logical user service. No React/UI dependency — pure business service.",
+    "execution": { "target": "shared", "mode": "async" },
+    "definition": {
+      "serviceType": "service",
+      "lifetime": "singleton",
+      "properties": [
+        { "name": "currentUser", "type": "object", "default": null }
+      ],
+      "dependencies": [],
+      "methods": [
+        {
+          "id": "method.user.find",
+          "name": "findUser",
+          "function": "function.user-api.find-by-email",
+          "parameters": [{ "name": "email", "type": "string", "required": true }],
+          "return": { "name": "user", "type": "object", "nullable": true }
+        },
+        {
+          "id": "method.user.create",
+          "name": "createUser",
+          "function": "function.user-api.create-user",
+          "parameters": [
+            { "name": "name", "type": "string", "required": true },
+            { "name": "email", "type": "string", "required": true },
+            { "name": "password", "type": "string", "required": true }
+          ],
+          "return": { "name": "user", "type": "object" }
+        }
+      ]
+    }
+  },
+  {
+    "id": "class.validation-service",
+    "name": "ValidationService",
+    "type": "class",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Logical validation service delegating to reusable functions.",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "serviceType": "service",
+      "lifetime": "singleton",
+      "dependencies": ["class.user-service"],
+      "methods": [
+        {
+          "id": "method.validation.email",
+          "name": "validateEmail",
+          "function": "function.user.validate-email",
+          "parameters": [{ "name": "email", "type": "string", "required": true }],
+          "return": { "name": "valid", "type": "boolean" }
+        },
+        {
+          "id": "method.validation.password",
+          "name": "validatePassword",
+          "function": "function.user.validate-password",
+          "parameters": [{ "name": "password", "type": "string", "required": true }],
+          "return": { "name": "result", "type": "object" }
+        },
+        {
+          "id": "method.validation.normalize-email",
+          "name": "normalizeEmail",
+          "function": "function.user.normalize-email",
+          "parameters": [{ "name": "email", "type": "string", "required": true }],
+          "return": { "name": "email", "type": "string" }
+        }
+      ]
+    }
+  }
+]

@@ -58,6 +58,8 @@ export class MethodExecutor {
           signal: ctx.signal,
           parentExecutionId: ctx.executionId,
           budget: ctx.budget,
+          user: ctx.user,
+          environment: ctx.environment,
         });
         if (!res.success) {
           throw new VdsError(res.error!.code, res.error!.message, res.error!.details);

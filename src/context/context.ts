@@ -43,6 +43,13 @@ export interface ExecutionContext {
   /** Shared node-execution budget (loop/recursion/event-recursion protection). */
   budget: ExecutionBudget;
 
+  /**
+   * This execution's own node limit (from the flow definition) and how many
+   * nodes it has spent. The strictest of { shared budget, local limit } wins.
+   */
+  localNodeLimit: number;
+  localSpent: number;
+
   /** Class instance bound to the current method call, if any. */
   instance?: unknown;
 
@@ -92,6 +99,8 @@ export class ContextManager {
       },
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       budget: opts.budget ?? { remaining: opts.nodeBudget ?? 10000 },
+      localNodeLimit: opts.nodeBudget ?? 10000,
+      localSpent: 0,
       instances: new Map(),
       engine: opts.engine,
       ...(opts.tracer !== undefined ? { tracer: opts.tracer } : {}),

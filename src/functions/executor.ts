@@ -67,6 +67,16 @@ export class FunctionExecutor {
           // Capability gate: every capability the definition requires must be
           // granted by the native registration or by the engine policy.
           const required = def.execution?.capabilities ?? [];
+          // F-05: in untrusted spec mode, native-backed functions MUST declare
+          // their required capabilities — deny by default, never rely on the
+          // JSON author remembering to declare sensitive capabilities.
+          if (this.engine.specMode === "untrusted" && required.length === 0) {
+            throw new VdsError(
+              ErrorCodes.NOT_ALLOWED,
+              `function ${def.id} calls a native implementation but declares no capabilities (specMode "untrusted" requires an explicit declaration)`,
+              { ref: def.id, native: d.native },
+            );
+          }
           const missing = required.filter(
             (cap) =>
               !reg.capabilities.has(cap) &&
@@ -95,6 +105,10 @@ export class FunctionExecutor {
             input: normalized,
             signal: ctx.signal,
             parentExecutionId: ctx.executionId,
+            budget: ctx.budget,
+            // inherit explicitly permitted context namespaces
+            user: ctx.user,
+            environment: ctx.environment,
           });
           if (!res.success) {
             throw new VdsError(res.error!.code, res.error!.message, res.error!.details);

@@ -1,0 +1,67 @@
+[
+  {
+    "id": "event.form.submit",
+    "name": "formSubmit",
+    "type": "event",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Emitted by the Expo JSON Form Builder when a form is submitted",
+    "definition": {
+      "payload": [
+        { "name": "formId", "type": "string", "required": true },
+        { "name": "values", "type": "object", "required": true }
+      ]
+    }
+  },
+  {
+    "id": "event.user.registered",
+    "name": "userRegistered",
+    "type": "event",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "definition": {
+      "payload": [
+        { "name": "userId", "type": "string", "required": true },
+        { "name": "email", "type": "string", "required": true }
+      ]
+    }
+  },
+  {
+    "id": "event.flow.error",
+    "name": "flowError",
+    "type": "event",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "definition": {
+      "payload": [
+        { "name": "flow", "type": "string", "required": true },
+        { "name": "error", "type": "object", "required": true }
+      ]
+    }
+  },
+  {
+    "id": "event.app.start",
+    "name": "appStart",
+    "type": "event",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Dispatched by the Expo adapter useAppLifecycle hook",
+    "definition": { "payload": [{ "name": "at", "type": "integer" }] }
+  },
+  {
+    "id": "event.app.foreground",
+    "name": "appForeground",
+    "type": "event",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "definition": { "payload": [{ "name": "state", "type": "string" }] }
+  },
+  {
+    "id": "event.app.background",
+    "name": "appBackground",
+    "type": "event",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "definition": { "payload": [{ "name": "state", "type": "string" }] }
+  }
+]

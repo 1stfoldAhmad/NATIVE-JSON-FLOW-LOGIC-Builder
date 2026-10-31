@@ -29,6 +29,14 @@ export interface ClassInstance {
   disposed: boolean;
 }
 
+/** Deep-clone a JSON default so instances never share mutable references. */
+function cloneDefault<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  const sc = (globalThis as { structuredClone?: (v: unknown) => unknown }).structuredClone;
+  if (typeof sc === "function") return sc(value) as T;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
 export class ClassRegistry {
   private defs = new Map<string, ClassSpec>();
   private singletons = new Map<string, ClassInstance>();
@@ -75,7 +83,7 @@ export class ClassRegistry {
     }
     const properties: Record<string, unknown> = {};
     for (const p of def.definition.properties ?? []) {
-      properties[p.name] = p.default !== undefined ? p.default : null;
+      properties[p.name] = p.default !== undefined ? cloneDefault(p.default) : null;
     }
     const services: Record<string, ClassInstance> = {};
     for (const depId of def.definition.dependencies ?? []) {
@@ -87,10 +95,18 @@ export class ClassRegistry {
     return instance;
   }
 
+  /**
+   * Dispose an instance and only the dependencies it OWNS. Singleton
+   * dependencies are engine-owned and are NEVER disposed by a dependent —
+   * disposing a transient/execution instance must not invalidate a shared
+   * singleton. Singletons are only disposed via disposeAll() (engine shutdown).
+   */
   dispose(instance: ClassInstance): void {
     if (instance.disposed) return;
     instance.disposed = true;
-    for (const dep of Object.values(instance.services)) this.dispose(dep);
+    for (const dep of Object.values(instance.services)) {
+      if (dep.lifetime !== "singleton") this.dispose(dep);
+    }
     if (this.singletons.get(instance.classId) === instance) {
       this.singletons.delete(instance.classId);
     }

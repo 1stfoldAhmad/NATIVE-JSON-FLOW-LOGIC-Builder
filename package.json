@@ -1,7 +1,7 @@
 {
   "name": "vds-json-logic",
   "version": "0.1.0",
-  "description": "JSON Logic Flow Builder — declarative JSON business-logic engine (logic, functions, classes, hooks, flows) with a thin Expo/React adapter. Core engine is independent of React, Expo and UI.",
+  "description": "JSON Logic Flow Builder \u2014 declarative JSON business-logic engine (logic, functions, classes, hooks, flows) with a thin Expo/React adapter. Core engine is independent of React, Expo and UI.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
@@ -15,7 +15,11 @@
       "types": "./dist/expo/index.d.ts",
       "default": "./dist/expo/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./node": {
+      "types": "./dist/node-io.d.ts",
+      "default": "./dist/node-io.js"
+    }
   },
   "files": [
     "dist",
@@ -25,8 +29,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test \"tests/*.test.ts\"",
-    "demo": "node scripts/demo.ts"
+    "test": "tsx --test \"tests/*.test.ts\"",
+    "demo": "tsx scripts/demo.ts"
   },
   "engines": {
     "node": ">=18"
@@ -43,6 +47,7 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "react": "^19.0.0",
+    "tsx": "^4.20.0",
     "typescript": "^5.9.2"
   }
 }

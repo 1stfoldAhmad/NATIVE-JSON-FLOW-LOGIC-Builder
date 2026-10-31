@@ -1,0 +1,28 @@
+[
+  {
+    "id": "logic.registration.eligible",
+    "name": "registrationEligible",
+    "type": "logic",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Business condition: a registrant must be at least 18 years old",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "parameters": [{ "name": "age", "type": "integer", "required": true, "default": 0 }],
+      "expression": { "operator": "gte", "arguments": ["$.age", 18] }
+    }
+  },
+  {
+    "id": "logic.order.free-shipping-threshold",
+    "name": "freeShippingThreshold",
+    "type": "logic",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Business condition: orders of 100 or more ship free",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "parameters": [{ "name": "total", "type": "number", "required": true }],
+      "expression": { "operator": "gte", "arguments": ["$.total", 100] }
+    }
+  }
+]
