@@ -30,6 +30,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "tsx --test \"tests/*.test.ts\"",
+    "smoke": "node scripts/smoke-dist.mjs",
     "demo": "tsx scripts/demo.ts"
   },
   "engines": {

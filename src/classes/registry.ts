@@ -87,7 +87,17 @@ export class ClassRegistry {
     }
     const services: Record<string, ClassInstance> = {};
     for (const depId of def.definition.dependencies ?? []) {
-      services[depId] = await this.createInstance(depId, engine, ctx);
+      const depInstance = await this.createInstance(depId, engine, ctx);
+      if (depInstance.disposed) {
+        // Audit F1 runtime guard: a disposed dependency must never be wired
+        // into a live instance (load-time validation normally prevents this).
+        throw new VdsError(
+          ErrorCodes.LIFETIME_INCOMPATIBLE,
+          `dependency "${depId}" of "${classId}" is disposed and cannot be injected`,
+          { from: classId, ref: depId },
+        );
+      }
+      services[depId] = depInstance;
     }
     const instance: ClassInstance = { classId, lifetime, properties, services, disposed: false };
     if (lifetime === "singleton") this.singletons.set(classId, instance);

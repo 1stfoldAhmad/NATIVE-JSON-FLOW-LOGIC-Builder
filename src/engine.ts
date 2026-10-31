@@ -52,6 +52,10 @@ export type RuntimeEnvironment = "frontend" | "backend";
 
 export interface LogicEngineOptions {
   trace?: boolean;
+  /** Max total retained trace events (default 1000); oldest are dropped, `tracer.truncated` is set. */
+  traceMaxEvents?: number;
+  /** Max retained trace events per execution (default 250). */
+  traceMaxEventsPerExecution?: number;
   projectId?: string;
   /**
    * The environment this engine runs in. Definitions whose
@@ -109,7 +113,7 @@ export class LogicEngine {
   readonly contextManager = new ContextManager();
   readonly state = new StateManager();
   readonly events = new EventManager();
-  readonly tracer = new ExecutionTracer();
+  readonly tracer: ExecutionTracer;
 
   /** The environment this engine enforces (frontend by default). */
   readonly environment: RuntimeEnvironment;
@@ -142,7 +146,10 @@ export class LogicEngine {
     this.strictEvents = opts.strictEvents ?? false;
     this.specMode = opts.specMode ?? "trusted";
     for (const c of opts.capabilities ?? []) this.grantedCapabilities.add(c);
-    if (opts.trace) this.tracer.enabled = true;
+    this.tracer = new ExecutionTracer(opts.trace ?? false, {
+      maxEvents: opts.traceMaxEvents,
+      maxEventsPerExecution: opts.traceMaxEventsPerExecution,
+    });
     this.functionExecutor = new FunctionExecutor(this.functions, this);
     this.methodExecutor = new MethodExecutor(this.classes, this.functionExecutor, this);
     this.hooks = new HookEngine(this);
@@ -401,14 +408,21 @@ export class LogicEngine {
   }
 
   /** Raw function call inside an existing execution context. */
-  callFunctionData(
+  async callFunctionData(
     id: string,
     args: Record<string, unknown>,
     ctx?: ExecutionContext,
     instance?: unknown,
   ): Promise<unknown> {
-    const context = ctx ?? this.createContext({ input: args });
-    return this.functionExecutor.call(id, args, context, instance);
+    // Audit F7: when this helper creates its own context it owns it and must
+    // dispose it (callers passing a context keep ownership).
+    if (ctx) return this.functionExecutor.call(id, args, ctx, instance);
+    const context = this.createContext({ input: args });
+    try {
+      return await this.functionExecutor.call(id, args, context, instance);
+    } finally {
+      this.contextManager.dispose(context);
+    }
   }
 
   /** Call a class method; returns the standard ExecutionResult. */
@@ -433,14 +447,20 @@ export class LogicEngine {
   }
 
   /** Raw method call inside an existing execution context. */
-  callMethodData(
+  async callMethodData(
     classId: string,
     method: string,
     args: Record<string, unknown>,
     ctx?: ExecutionContext,
   ): Promise<unknown> {
-    const context = ctx ?? this.createContext({ input: args });
-    return this.methodExecutor.invoke(classId, method, args, context);
+    // Audit F7: same ownership rule as callFunctionData.
+    if (ctx) return this.methodExecutor.invoke(classId, method, args, ctx);
+    const context = this.createContext({ input: args });
+    try {
+      return await this.methodExecutor.invoke(classId, method, args, context);
+    } finally {
+      this.contextManager.dispose(context);
+    }
   }
 
   /** Execute a JSON-defined flow; returns the standard ExecutionResult. */
@@ -455,8 +475,21 @@ export class LogicEngine {
    */
   async dispatch(event: string, payload: unknown, ctx?: ExecutionContext): Promise<unknown> {
     const def = this.findEventDef(event);
-    if (def?.definition.payload && payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-      validateParams(def.definition.payload, payload as Record<string, unknown>, `event "${event}" payload`);
+    const contract = def?.definition.payload;
+    if (Array.isArray(contract) && contract.length > 0) {
+      // Audit F3: a declared payload contract is strict — the payload must be
+      // a plain object. Primitives, arrays and null/undefined are rejected
+      // instead of bypassing validation.
+      if (payload === null || payload === undefined || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new VdsError(
+          ErrorCodes.VALIDATION_FAILED,
+          `event "${event}" declares a payload contract; payload must be a plain object (got ${
+            payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload
+          })`,
+          { event },
+        );
+      }
+      validateParams(contract, payload as Record<string, unknown>, `event "${event}" payload`);
     }
     const run = async (): Promise<unknown> => {
       const hookResults = await this.hooks.dispatch(event, payload, ctx);

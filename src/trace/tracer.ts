@@ -14,17 +14,42 @@ export interface TraceEvent {
   details?: Record<string, unknown>;
 }
 
+export interface TracerOptions {
+  /** Max total retained events (default 1000). When full, new events are dropped and `truncated` is set. */
+  maxEvents?: number;
+  /** Max retained events per execution (default 250). */
+  maxEventsPerExecution?: number;
+}
+
 export class ExecutionTracer {
   enabled: boolean;
   readonly events: TraceEvent[] = [];
+  /** True once events were dropped because a retention limit was hit. */
+  truncated = false;
+  readonly maxEvents: number;
+  readonly maxEventsPerExecution: number;
   private starts = new Map<string, number>();
+  private perExecution = new Map<string, number>();
 
-  constructor(enabled = false) {
+  constructor(enabled = false, opts: TracerOptions = {}) {
     this.enabled = enabled;
+    this.maxEvents = opts.maxEvents ?? 1000;
+    this.maxEventsPerExecution = opts.maxEventsPerExecution ?? 250;
   }
 
   record(input: Omit<TraceEvent, "at">): void {
     if (!this.enabled) return;
+    // Bounded retention (audit F4): never grow unbounded on long-running apps.
+    if (this.events.length >= this.maxEvents) {
+      this.truncated = true;
+      return;
+    }
+    const count = this.perExecution.get(input.executionId) ?? 0;
+    if (count >= this.maxEventsPerExecution) {
+      this.truncated = true;
+      return;
+    }
+    this.perExecution.set(input.executionId, count + 1);
     const event: TraceEvent = { ...input, at: Date.now() };
     this.events.push(event);
     if (event.kind === "node" && event.details?.phase === "start") {
@@ -44,8 +69,15 @@ export class ExecutionTracer {
     return this.events.filter((e) => e.executionId === executionId);
   }
 
+  /** Export a copy of the retained events. */
+  snapshot(): TraceEvent[] {
+    return [...this.events];
+  }
+
   clear(): void {
     this.events.length = 0;
     this.starts.clear();
+    this.perExecution.clear();
+    this.truncated = false;
   }
 }
