@@ -228,6 +228,11 @@ export interface IfNode extends NodeBase {
   else?: FlowNode[];
 }
 export interface SwitchCase {
+  /**
+   * Case value: evaluated and compared (deep equality) against the switch
+   * node's evaluated `value`. The first matching case runs; otherwise
+   * `default` runs.
+   */
   when: Expression;
   nodes: FlowNode[];
 }

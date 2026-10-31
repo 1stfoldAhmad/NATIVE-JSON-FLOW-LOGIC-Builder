@@ -1,13 +1,22 @@
 /**
  * Execution context and variable scopes.
  *
- * Scopes: local (one function/loop body, a stack), flow (variables for one
- * execution), and input (read-only flow input). "$" paths resolve against
- * the merge: input < flow variables < innermost local scope.
+ * Scopes: input (read-only flow input), flow variables (one execution),
+ * local scopes (loop bodies / catch blocks, a stack). "$" paths resolve
+ * against the merged data plus explicit namespaces:
+ *   $.input  $.variables  $.user  $.environment  $.state  $.event
  */
 
+import { ErrorCodes, VdsError } from "../errors.ts";
+import { isDangerousSegment } from "../logic/paths.ts";
 import type { LogicEngine } from "../engine.ts";
 import type { ExecutionTracer } from "../trace/tracer.ts";
+import type { ClassInstance } from "../classes/registry.ts";
+
+/** Shared execution budget — propagated to nested flows and event-driven hooks. */
+export interface ExecutionBudget {
+  remaining: number;
+}
 
 export interface ExecutionContext {
   executionId: string;
@@ -20,6 +29,9 @@ export interface ExecutionContext {
   user?: Record<string, unknown>;
   environment: Record<string, unknown>;
 
+  /** Event currently being dispatched (namespace $.event), if any. */
+  event?: string;
+
   metadata: {
     startedAt: number;
     correlationId?: string;
@@ -28,14 +40,17 @@ export interface ExecutionContext {
 
   signal?: AbortSignal;
 
-  /** Remaining node-execution budget (loop/recursion protection). */
-  nodeBudget: number;
+  /** Shared node-execution budget (loop/recursion/event-recursion protection). */
+  budget: ExecutionBudget;
 
   /** Class instance bound to the current method call, if any. */
   instance?: unknown;
 
   /** Current foreach item, exposed to expressions as "@". */
   current?: unknown;
+
+  /** Execution-scoped class instances (lifetime "execution"), disposed with the context. */
+  instances: Map<string, ClassInstance>;
 
   engine: LogicEngine;
   tracer?: ExecutionTracer;
@@ -55,6 +70,7 @@ export interface CreateContextOptions {
   parentExecutionId?: string;
   correlationId?: string;
   nodeBudget?: number;
+  budget?: ExecutionBudget;
   engine: LogicEngine;
   tracer?: ExecutionTracer;
 }
@@ -75,7 +91,8 @@ export class ContextManager {
         ...(opts.parentExecutionId !== undefined ? { parentExecutionId: opts.parentExecutionId } : {}),
       },
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-      nodeBudget: opts.nodeBudget ?? 10000,
+      budget: opts.budget ?? { remaining: opts.nodeBudget ?? 10000 },
+      instances: new Map(),
       engine: opts.engine,
       ...(opts.tracer !== undefined ? { tracer: opts.tracer } : {}),
       scopes: [],
@@ -91,15 +108,22 @@ export class ContextManager {
   }
 
   /**
-   * Set a flow-level variable. Loop-local bindings (foreach `as`/`index`,
-   * catch `error`) are written directly into the pushed scope instead.
+   * Set a flow-level variable (visible for the rest of the execution,
+   * including after loops). Loop-local bindings use setLocal() instead.
    */
   set(ctx: ExecutionContext, name: string, value: unknown): void {
+    // `obj["__proto__"] = v` would mutate the prototype — refuse dangerous names.
+    if (isDangerousSegment(name)) {
+      throw new VdsError(ErrorCodes.SPEC_INVALID, `Refusing to set dangerous variable name "${name}"`);
+    }
     ctx.variables[name] = value;
   }
 
   /** Set a variable in the innermost local scope (loop body / catch block). */
   setLocal(ctx: ExecutionContext, name: string, value: unknown): void {
+    if (isDangerousSegment(name)) {
+      throw new VdsError(ErrorCodes.SPEC_INVALID, `Refusing to set dangerous variable name "${name}"`);
+    }
     if (ctx.scopes.length > 0) {
       ctx.scopes[ctx.scopes.length - 1]![name] = value;
     } else {
@@ -116,15 +140,26 @@ export class ContextManager {
     return undefined;
   }
 
-  /** Merged root for "$" path resolution. */
+  /**
+   * Merged root for "$" path resolution: input < flow variables < local
+   * scopes, plus explicit namespaces ($.input, $.variables, $.user,
+   * $.environment, $.state, $.event).
+   */
   data(ctx: ExecutionContext): Record<string, unknown> {
     const merged: Record<string, unknown> = { ...ctx.input, ...ctx.variables };
     for (const scope of ctx.scopes) Object.assign(merged, scope);
+    merged.input = ctx.input;
+    merged.variables = ctx.variables;
+    if (ctx.user !== undefined) merged.user = ctx.user;
+    merged.environment = ctx.environment;
+    merged.state = ctx.engine.state.get() as Record<string, unknown>;
+    if (ctx.event !== undefined) merged.event = ctx.event;
     return merged;
   }
 
   dispose(ctx: ExecutionContext): void {
     ctx.scopes.length = 0;
     ctx.variables = {};
+    ctx.instances.clear();
   }
 }

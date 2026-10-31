@@ -29,7 +29,7 @@
     "demo": "node scripts/demo.ts"
   },
   "engines": {
-    "node": ">=22.6.0"
+    "node": ">=18"
   },
   "peerDependencies": {
     "react": ">=18.0.0"

@@ -77,8 +77,8 @@ test("switch node selects the matching case", async () => {
           type: "switch",
           value: "$.role",
           cases: [
-            { when: { operator: "eq", arguments: ["$.role", "admin"] }, nodes: [{ id: "a", type: "return", value: "admin-area" }] },
-            { when: { operator: "eq", arguments: ["$.role", "user"] }, nodes: [{ id: "u", type: "return", value: "user-area" }] },
+            { when: "admin", nodes: [{ id: "a", type: "return", value: "admin-area" }] },
+            { when: "user", nodes: [{ id: "u", type: "return", value: "user-area" }] },
           ],
           default: [{ id: "d", type: "return", value: "guest-area" }],
         },

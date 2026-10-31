@@ -1,16 +1,27 @@
 /**
- * Data path resolution for expressions.
+ * Data path resolution for expressions — hardened against prototype pollution.
  *
  * Grammar:  $ | @  followed by segments:
- *   .name        descend into object property
+ *   .name        descend into object property (own properties only)
  *   [n]          array index
  *   ["name"]     object property (quoted)
  *   [*]          wildcard — maps the remaining path over each array element
+ *
+ * Dangerous segments ("__proto__", "constructor", "prototype") are rejected
+ * by the parser, reads use own-property checks, and setPath refuses to write
+ * through them.
  *
  * Examples: "$.items[*].price", "$.user.address.city", "@[0].id", "@.name"
  */
 
 export type PathSegment = string | number | "*";
+
+/** Keys that must never be followed or written through a data path. */
+export const DANGEROUS_SEGMENTS: readonly string[] = ["__proto__", "constructor", "prototype"];
+
+export function isDangerousSegment(seg: string): boolean {
+  return DANGEROUS_SEGMENTS.includes(seg);
+}
 
 export function parsePath(path: string): PathSegment[] | null {
   if (path === "$" || path === "@") return [];
@@ -24,7 +35,7 @@ export function parsePath(path: string): PathSegment[] | null {
       let j = i + 1;
       while (j < path.length && path[j] !== "." && path[j] !== "[") j++;
       const name = path.slice(i + 1, j);
-      if (!name) return null;
+      if (!name || isDangerousSegment(name)) return null;
       segs.push(name);
       i = j;
     } else if (ch === "[") {
@@ -38,7 +49,9 @@ export function parsePath(path: string): PathSegment[] | null {
         ((inner[0] === '"' && inner[inner.length - 1] === '"') ||
           (inner[0] === "'" && inner[inner.length - 1] === "'"))
       ) {
-        segs.push(inner.slice(1, -1));
+        const name = inner.slice(1, -1);
+        if (isDangerousSegment(name)) return null;
+        segs.push(name);
       } else return null;
       i = close + 1;
     } else {
@@ -69,7 +82,13 @@ function walk(value: unknown, segs: PathSegment[], idx: number): PathResult {
     if (!Array.isArray(value) || seg < 0 || seg >= value.length) return { found: false };
     return walk(value[seg], segs, idx + 1);
   }
-  if (typeof value === "object" && value !== null && !Array.isArray(value) && seg in value) {
+  // Own-property reads only: inherited properties are not exposed.
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, seg)
+  ) {
     return walk((value as Record<string, unknown>)[seg], segs, idx + 1);
   }
   return { found: false };
@@ -77,7 +96,7 @@ function walk(value: unknown, segs: PathSegment[], idx: number): PathResult {
 
 /**
  * Resolve a path against a root ("$") or the current item ("@").
- * Returns { found: false } when any segment is missing.
+ * Returns { found: false } when any segment is missing or unsafe.
  */
 export function resolvePath(root: unknown, path: string, current?: unknown): PathResult {
   const segs = parsePath(path);
@@ -87,11 +106,20 @@ export function resolvePath(root: unknown, path: string, current?: unknown): Pat
   return walk(base, segs, 0);
 }
 
-/** Set a nested value by path, creating intermediate objects. */
+/** Set a nested value by path, creating intermediate objects. Never writes through dangerous keys. */
 export function setPath(root: Record<string, unknown>, path: string, value: unknown): void {
   const segs = parsePath(path);
-  if (!segs || segs.length === 0 || typeof segs[0] !== "string") {
+  if (!segs) {
+    if (/__proto__|constructor|prototype/.test(path)) {
+      throw new Error(`setPath refuses dangerous path "${path}"`);
+    }
     throw new Error(`setPath requires a property path, got "${path}"`);
+  }
+  if (segs.length === 0 || typeof segs[0] !== "string") {
+    throw new Error(`setPath requires a property path, got "${path}"`);
+  }
+  if (segs.some((s) => typeof s === "string" && isDangerousSegment(s))) {
+    throw new Error(`setPath refuses dangerous path "${path}"`);
   }
   let cur: Record<string, unknown> = root;
   for (let i = 0; i < segs.length - 1; i++) {

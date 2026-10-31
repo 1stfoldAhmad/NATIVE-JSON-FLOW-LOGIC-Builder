@@ -1,16 +1,27 @@
 /**
- * Class registry: logical service definitions with controlled instance
- * lifetimes (singleton | instance) and dependency injection. A class never
- * depends on a React component — only on other registered classes.
+ * Class registry: logical service definitions with a precise lifetime
+ * contract and dependency injection. A class never depends on a React
+ * component — only on other registered classes.
+ *
+ * Lifetimes:
+ *  - "singleton"   one instance per engine (default); disposed via engine.dispose()
+ *  - "execution"   one instance per flow execution (cached on the context,
+ *                  disposed when the execution finishes)
+ *  - "transient"   a new instance per method call, disposed after the call
+ *  - "instance"    deprecated alias of "transient"
  */
 
 import { ErrorCodes, VdsError } from "../errors.ts";
 import { assertValidDefinition } from "../spec/validate.ts";
 import type { ClassSpec } from "../spec/types.ts";
+import type { ExecutionContext } from "../context/context.ts";
 import type { LogicEngine } from "../engine.ts";
+
+export type ClassLifetime = "singleton" | "execution" | "transient";
 
 export interface ClassInstance {
   classId: string;
+  lifetime: ClassLifetime;
   /** Property values (initialized from defaults). */
   properties: Record<string, unknown>;
   /** Injected dependency instances keyed by their class id. */
@@ -42,12 +53,24 @@ export class ClassRegistry {
     return def;
   }
 
-  /** Create (or fetch the singleton of) a class instance with deps injected. */
-  async createInstance(classId: string, engine: LogicEngine): Promise<ClassInstance> {
+  static lifetimeOf(def: ClassSpec): ClassLifetime {
+    const lt = def.definition.lifetime ?? "singleton";
+    return lt === "instance" ? "transient" : (lt as ClassLifetime);
+  }
+
+  /**
+   * Create (or fetch) a class instance according to its lifetime.
+   * "execution" instances are cached on the provided context.
+   */
+  async createInstance(classId: string, engine: LogicEngine, ctx?: ExecutionContext): Promise<ClassInstance> {
     const def = this.get(classId);
-    const lifetime = def.definition.lifetime ?? "singleton";
+    const lifetime = ClassRegistry.lifetimeOf(def);
     if (lifetime === "singleton") {
       const cached = this.singletons.get(classId);
+      if (cached && !cached.disposed) return cached;
+    }
+    if (lifetime === "execution" && ctx) {
+      const cached = ctx.instances.get(classId);
       if (cached && !cached.disposed) return cached;
     }
     const properties: Record<string, unknown> = {};
@@ -56,18 +79,26 @@ export class ClassRegistry {
     }
     const services: Record<string, ClassInstance> = {};
     for (const depId of def.definition.dependencies ?? []) {
-      services[depId] = await this.createInstance(depId, engine);
+      services[depId] = await this.createInstance(depId, engine, ctx);
     }
-    const instance: ClassInstance = { classId, properties, services, disposed: false };
+    const instance: ClassInstance = { classId, lifetime, properties, services, disposed: false };
     if (lifetime === "singleton") this.singletons.set(classId, instance);
+    if (lifetime === "execution" && ctx) ctx.instances.set(classId, instance);
     return instance;
   }
 
   dispose(instance: ClassInstance): void {
+    if (instance.disposed) return;
     instance.disposed = true;
+    for (const dep of Object.values(instance.services)) this.dispose(dep);
     if (this.singletons.get(instance.classId) === instance) {
       this.singletons.delete(instance.classId);
     }
+  }
+
+  /** Dispose all singleton instances (engine shutdown). */
+  disposeAll(): void {
+    for (const instance of [...this.singletons.values()]) this.dispose(instance);
   }
 
   list(): ClassSpec[] {

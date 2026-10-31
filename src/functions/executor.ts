@@ -33,6 +33,8 @@ export class FunctionExecutor {
     instance?: unknown,
   ): Promise<unknown> {
     const def = typeof ref === "string" ? this.registry.get(ref) : ref;
+    // Runtime policy: execution-target compatibility.
+    this.engine.assertTargetAllowed(def);
     const d = def.definition;
     const params = d.parameters ?? def.inputs ?? [];
     const normalized = validateParams(params, args, `function ${def.id}`);
@@ -61,8 +63,28 @@ export class FunctionExecutor {
           if (!d.native) {
             throw new VdsError(ErrorCodes.SPEC_INVALID, `function ${def.id} has no native name`);
           }
-          const impl = this.registry.getNative(d.native);
-          result = await impl(normalized, instance !== undefined ? { ...ctx, instance } : ctx, instance);
+          const reg = this.registry.getNative(d.native);
+          // Capability gate: every capability the definition requires must be
+          // granted by the native registration or by the engine policy.
+          const required = def.execution?.capabilities ?? [];
+          const missing = required.filter(
+            (cap) =>
+              !reg.capabilities.has(cap) &&
+              !reg.capabilities.has("*") &&
+              !this.engine.isCapabilityGranted(cap),
+          );
+          if (missing.length > 0) {
+            throw new VdsError(
+              ErrorCodes.NOT_ALLOWED,
+              `function ${def.id} requires capabilities not granted in this runtime: ${missing.join(", ")}`,
+              { ref: def.id, missing, environment: this.engine.environment },
+            );
+          }
+          result = await reg.impl(
+            normalized,
+            instance !== undefined ? { ...ctx, instance } : ctx,
+            instance,
+          );
           break;
         }
         case "flow": {

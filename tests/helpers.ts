@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LogicEngine } from "../src/index.ts";
 import type { AnySpec } from "../src/index.ts";
+import { loadSpecFiles } from "../src/node-io.ts";
 import { createDemoDb, registerDemoNatives } from "../examples/registration/native.ts";
 import type { DemoDb } from "../examples/registration/native.ts";
 
@@ -14,7 +15,7 @@ export function loadJsonFile<T = unknown>(name: string): T {
 }
 
 export function loadRegistrationSpecs(engine: LogicEngine): void {
-  engine.loadFiles([
+  loadSpecFiles(engine, [
     join(examplesDir, "logic.json"),
     join(examplesDir, "events.json"),
     join(examplesDir, "functions.json"),

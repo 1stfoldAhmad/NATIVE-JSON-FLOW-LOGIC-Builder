@@ -2,6 +2,10 @@
  * Function registry: JSON function definitions + explicitly registered
  * native implementations. Native implementations are the ONLY extension
  * point that can touch I/O — JSON itself can never execute code.
+ *
+ * Each native declares the capabilities it is granted; the executor checks
+ * them against the function definition's required capabilities plus the
+ * engine-level policy before every call (NOT_ALLOWED otherwise).
  */
 
 import { ErrorCodes, VdsError } from "../errors.ts";
@@ -15,9 +19,14 @@ export type NativeImpl = (
   instance?: unknown,
 ) => unknown | Promise<unknown>;
 
+export interface NativeRegistration {
+  impl: NativeImpl;
+  capabilities: Set<string>;
+}
+
 export class FunctionRegistry {
   private defs = new Map<string, FunctionSpec>();
-  private natives = new Map<string, NativeImpl>();
+  private natives = new Map<string, NativeRegistration>();
 
   register(def: FunctionSpec): void {
     assertValidDefinition(def);
@@ -27,11 +36,14 @@ export class FunctionRegistry {
     this.defs.set(def.id, def);
   }
 
-  registerNative(name: string, impl: NativeImpl): void {
+  registerNative(name: string, impl: NativeImpl, capabilities?: string[]): void {
     if (typeof name !== "string" || !name) {
       throw new VdsError(ErrorCodes.PARAM_INVALID, "native name must be a non-empty string");
     }
-    this.natives.set(name, impl);
+    this.natives.set(name, {
+      impl,
+      capabilities: new Set(capabilities ?? []),
+    });
   }
 
   has(id: string): boolean {
@@ -46,14 +58,14 @@ export class FunctionRegistry {
     return def;
   }
 
-  getNative(name: string): NativeImpl {
-    const impl = this.natives.get(name);
-    if (!impl) {
+  getNative(name: string): NativeRegistration {
+    const reg = this.natives.get(name);
+    if (!reg) {
       throw new VdsError(ErrorCodes.NATIVE_NOT_FOUND, `No native implementation registered as "${name}"`, {
         native: name,
       });
     }
-    return impl;
+    return reg;
   }
 
   list(): FunctionSpec[] {
