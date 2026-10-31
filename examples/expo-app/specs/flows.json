@@ -1,0 +1,190 @@
+[
+  {
+    "id": "flow.user.registration",
+    "name": "userRegistration",
+    "type": "flow",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "First working demonstration: user registration workflow",
+    "execution": { "target": "shared", "mode": "async" },
+    "definition": {
+      "parameters": [
+        { "name": "name", "type": "string", "required": true },
+        { "name": "email", "type": "string", "required": true },
+        { "name": "password", "type": "string", "required": true },
+        { "name": "age", "type": "integer", "default": 0 }
+      ],
+      "returns": { "name": "result", "type": "object" },
+      "limits": { "timeoutMs": 30000, "maxNodeExecutions": 1000 },
+      "nodes": [
+        { "id": "start", "type": "start", "next": "normalize" },
+        {
+          "id": "normalize",
+          "type": "set",
+          "assignments": {
+            "email": {
+              "operator": "lower",
+              "arguments": [{ "operator": "trim", "arguments": ["$.email"] }]
+            }
+          },
+          "next": "validate-email"
+        },
+        {
+          "id": "validate-email",
+          "type": "callMethod",
+          "class": "class.validation-service",
+          "method": "validateEmail",
+          "args": { "email": "$.email" },
+          "assign": "emailValid",
+          "next": "check-email"
+        },
+        {
+          "id": "check-email",
+          "type": "if",
+          "condition": { "operator": "not", "arguments": ["$.emailValid"] },
+          "then": [
+            {
+              "id": "throw-email",
+              "type": "throw",
+              "error": {
+                "code": "VALIDATION_FAILED",
+                "message": "Invalid email address",
+                "details": { "field": "email" }
+              }
+            }
+          ],
+          "else": [],
+          "next": "validate-password"
+        },
+        {
+          "id": "validate-password",
+          "type": "callMethod",
+          "class": "class.validation-service",
+          "method": "validatePassword",
+          "args": { "password": "$.password" },
+          "assign": "passwordCheck",
+          "next": "check-password"
+        },
+        {
+          "id": "check-password",
+          "type": "if",
+          "condition": { "operator": "not", "arguments": ["$.passwordCheck.valid"] },
+          "then": [
+            {
+              "id": "throw-password",
+              "type": "throw",
+              "error": {
+                "code": "VALIDATION_FAILED",
+                "message": "Password does not meet requirements",
+                "details": { "field": "password", "errors": "$.passwordCheck.errors" }
+              }
+            }
+          ],
+          "else": [],
+          "next": "check-eligibility"
+        },
+        {
+          "id": "check-eligibility",
+          "type": "if",
+          "condition": { "operator": "logic", "arguments": ["logic.registration.eligible", { "age": "$.age" }] },
+          "then": [],
+          "else": [
+            {
+              "id": "throw-age",
+              "type": "throw",
+              "error": { "code": "NOT_ELIGIBLE", "message": "User must be at least 18 years old" }
+            }
+          ],
+          "next": "find-user"
+        },
+        {
+          "id": "find-user",
+          "type": "callMethod",
+          "class": "class.user-service",
+          "method": "findUser",
+          "args": { "email": "$.email" },
+          "assign": "existingUser",
+          "next": "check-existing"
+        },
+        {
+          "id": "check-existing",
+          "type": "if",
+          "condition": "$.existingUser",
+          "then": [
+            {
+              "id": "throw-exists",
+              "type": "throw",
+              "error": {
+                "code": "ACCOUNT_EXISTS",
+                "message": "An account with this email already exists"
+              }
+            }
+          ],
+          "else": [],
+          "next": "create-user"
+        },
+        {
+          "id": "create-user",
+          "type": "callMethod",
+          "class": "class.user-service",
+          "method": "createUser",
+          "args": { "name": "$.name", "email": "$.email", "password": "$.password" },
+          "assign": "user",
+          "next": "notify"
+        },
+        {
+          "id": "notify",
+          "type": "emit",
+          "event": "user.registered",
+          "payload": { "userId": "$.user.id", "email": "$.user.email" },
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "type": "return",
+          "value": { "success": true, "user": "$.user" }
+        }
+      ],
+      "onError": [
+        {
+          "id": "on-error",
+          "type": "emit",
+          "event": "flow.error",
+          "payload": { "flow": "flow.user.registration", "error": "$.error" }
+        }
+      ]
+    }
+  },
+  {
+    "id": "flow.order.quote",
+    "name": "orderQuote",
+    "type": "flow",
+    "version": "1.0.0",
+    "spec_version": "1.0.0",
+    "description": "Subflow demonstration: computes an order quote via a pure function",
+    "execution": { "target": "shared", "mode": "sync" },
+    "definition": {
+      "parameters": [
+        { "name": "items", "type": "array", "required": true },
+        { "name": "taxRate", "type": "number", "default": 0 }
+      ],
+      "returns": { "name": "quote", "type": "object" },
+      "nodes": [
+        { "id": "start", "type": "start", "next": "calc" },
+        {
+          "id": "calc",
+          "type": "callFunction",
+          "ref": "function.order.calculate-total",
+          "args": { "items": "$.items", "taxRate": "$.taxRate" },
+          "assign": "total",
+          "next": "done"
+        },
+        {
+          "id": "done",
+          "type": "return",
+          "value": { "total": "$.total", "currency": "USD" }
+        }
+      ]
+    }
+  }
+]

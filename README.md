@@ -62,7 +62,7 @@ src/
   expo/       thin Expo/React adapter: LogicProvider, createExpoEngine, hooks
 examples/registration/   JSON specs + demo natives for the registration workflow
 scripts/demo.ts          runnable demo (plain Node): npm run demo
-tests/                   node:test suite (98 tests incl. security/policy regressions)
+tests/                   node:test suite (112 tests incl. security/policy regressions)
 ```
 
 ## Quick start (core, no React)
@@ -119,7 +119,8 @@ import { LogicEngine } from "vds-json-logic";
 import { LogicProvider, useFlow, useFlowState, useLogic, useService, useFlowEvent, useAppLifecycle } from "vds-json-logic/expo";
 
 const engine = new LogicEngine();
-// engine.registerNative(...); engine.loadFiles([...]);
+// engine.registerNative(...);
+// engine.loadJson([logicSpec, functionsSpec, classesSpec, hooksSpec, flowsSpec, eventsSpec]); // bundled JSON
 
 export default function App() {
   return (
@@ -143,8 +144,10 @@ function RegistrationScreen() {
 }
 ```
 
-See `examples/expo-registration/RegistrationScreen.tsx` for a full
-`@expo/ui` screen sketch.
+See `examples/expo-registration/RegistrationScreen.tsx` for a `@expo/ui`
+screen sketch, and `examples/expo-app/` for a complete runnable Expo app
+(`npx expo start`) wiring the Form Builder's `form.submit` event through
+`LogicProvider`/`useFlow` into the registration flow.
 
 ### Adapter hooks
 
@@ -177,7 +180,7 @@ Every definition shares one envelope:
 }
 ```
 
-- Files: `logic.json`, `functions.json`, `classes.json`, `hooks.json`, `flows.json`, `events.json` (load them in one `loadFiles([...])` batch).
+- Files: `logic.json`, `functions.json`, `classes.json`, `hooks.json`, `flows.json`, `events.json` (load them in one transactional batch: `engine.loadJson([...])` for bundled JSON in-app, or `loadSpecFiles(engine, [...])` from `vds-json-logic/node` in Node).
 - Stable dotted IDs, semantic versions, typed inputs/outputs
   (`string number integer boolean null object array date datetime file reference any`,
   plus `required` / `nullable` / `default` / `enum`).
@@ -244,24 +247,42 @@ input/output validation.
   item/index in a local scope and restores `@` after nested loops; flows execute
   through a compiled IR cached per flow id+version.
 - **Class lifetimes** — `singleton` (per engine), `execution` (per flow execution,
-  disposed with it), `transient` (per call, disposed after).
+  disposed with it), `transient` (per call, disposed after). Disposal is
+  ownership-aware: disposing a transient/execution instance NEVER disposes its
+  singleton dependencies (those are engine-owned and only `disposeAll()` —
+  engine shutdown — disposes them). Property defaults are deep-cloned per instance.
 - **Context namespaces** — `$.input`, `$.variables`, `$.user`, `$.environment`,
   `$.state`, `$.event` are explicit namespaces alongside merged flow data.
+- **Context propagation (nested executions)** — `callFlow`, flow-backed functions,
+  method-backed flows and hook handlers INHERIT `user`, `environment`, `signal`
+  and the shared execution budget from the caller; `input`/`variables`/`event`
+  are per-execution (isolated). `$.state` reads are deep-cloned.
+- **Deny-by-default capabilities (untrusted specs)** — `new LogicEngine({ specMode:
+  "untrusted" })` requires every native-backed function to declare
+  `execution.capabilities`, and each declared capability must still be granted by
+  the native registration or `grantCapability` (missing declaration → `NOT_ALLOWED`).
+  Default `specMode: "trusted"` keeps the opt-in behavior for app-authored specs.
+- **Nested budget semantics** — every flow's `limits.maxNodeExecutions` is a LOCAL
+  limit on top of the shared tree-wide budget; the strictest applicable limit wins
+  (`EXEC_LIMIT`).
 
 ## Scripts
 
 ```bash
 npm install
-npm test          # node --test (98 tests, plain Node — core needs no React)
+npm test          # tsx --test (112 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
 npm run demo      # end-to-end registration demo
-npm run typecheck # tsc --noEmit over src + tests + examples
+npm run typecheck # tsc --noEmit over src + tests + examples (examples/expo-app has its own tsconfig — run tsc there after its npm install)
 npm run build     # emit dist/ (core + ./expo entry)
 ```
 
 ## Roadmap (from the VDS plan)
 
 Phases 1–5 are implemented here (specification, logic engine, function/class
-engine, flow engine, hook/event engine, context/state). Next: Phase 7 in a real
-Expo app with `@expo/ui` + Form Builder integration (form.submit → hook → flow),
-then Phase 8 diagnostics and Phase 9 VDS project integration. Later: parallel
-node execution, durable/resumable workflows, backend execution adapters.
+engine, flow engine, hook/event engine, context/state). Phase 7's first vertical
+slice ships in `examples/expo-app/` — a real Expo app (`@expo/ui` +
+`LogicProvider`/`useFlow`) wiring the Form Builder's `form.submit` event through
+a JSON hook into the registration flow (run it with `npx expo start`; see its
+README for the verification checklist). Next: Phase 8 diagnostics and Phase 9
+VDS project integration. Later: parallel node execution, durable/resumable
+workflows, backend execution adapters.

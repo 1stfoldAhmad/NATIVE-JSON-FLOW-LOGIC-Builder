@@ -69,6 +69,14 @@ export interface LogicEngineOptions {
   capabilities?: string[];
   /** When true, emit nodes and hook triggers must reference registered event definitions. */
   strictEvents?: boolean;
+  /**
+   * Specification loading mode:
+   *  - "trusted" (default): definitions are authored by the application team.
+   *  - "untrusted": remotely/user supplied JSON — native-backed functions MUST
+   *    declare `execution.capabilities` (deny by default) and each required
+   *    capability must be granted by the native registration or engine policy.
+   */
+  specMode?: "trusted" | "untrusted";
 }
 
 export type ExecutionStatus = "running" | "completed" | "failed";
@@ -106,6 +114,8 @@ export class LogicEngine {
   /** The environment this engine enforces (frontend by default). */
   readonly environment: RuntimeEnvironment;
   readonly strictEvents: boolean;
+  /** Specification loading mode (trusted by default; untrusted = deny-by-default). */
+  readonly specMode: "trusted" | "untrusted";
 
   private functions = new FunctionRegistry();
   private classes = new ClassRegistry();
@@ -130,6 +140,7 @@ export class LogicEngine {
     this.projectId = opts.projectId;
     this.environment = opts.environment ?? "frontend";
     this.strictEvents = opts.strictEvents ?? false;
+    this.specMode = opts.specMode ?? "trusted";
     for (const c of opts.capabilities ?? []) this.grantedCapabilities.add(c);
     if (opts.trace) this.tracer.enabled = true;
     this.functionExecutor = new FunctionExecutor(this.functions, this);
@@ -367,11 +378,17 @@ export class LogicEngine {
   async callFunction(
     id: string,
     args: Record<string, unknown> = {},
-    opts: { signal?: AbortSignal; user?: Record<string, unknown> } = {},
+    opts: { signal?: AbortSignal; user?: Record<string, unknown>; environment?: Record<string, unknown> } = {},
   ): Promise<ExecutionResult> {
     const startedAt = Date.now();
     const executionId = this.newExecutionId();
-    const ctx = this.createContext({ executionId, input: args, signal: opts.signal, user: opts.user });
+    const ctx = this.createContext({
+      executionId,
+      input: args,
+      signal: opts.signal,
+      user: opts.user,
+      environment: opts.environment ?? { runtime: this.environment },
+    });
     try {
       const data = await this.functionExecutor.call(id, args, ctx);
       return ok(data, executionId, Date.now() - startedAt);
