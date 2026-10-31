@@ -11,6 +11,17 @@ export type {
   ExecutionListener,
 } from "./engine.ts";
 
+// NOTE: the core entry point is portable — it must never import node:* built-ins.
+// Filesystem spec loading lives in the separate "vds-json-logic/node" entry.
+
+export { parseSpecDocument, isEnvelope } from "./spec/load.ts";
+export { isSafePattern, MAX_PATTERN_LENGTH } from "./logic/regex-safety.ts";
+export { compileFlow } from "./flows/compiler.ts";
+export type { CompiledFlow, CompiledNode, CompiledCase } from "./flows/compiler.ts";
+export type { ClassLifetime } from "./classes/registry.ts";
+export { isDangerousSegment, DANGEROUS_SEGMENTS } from "./logic/paths.ts";
+export type { RuntimeEnvironment } from "./engine.ts";
+
 export { VdsError, ErrorCodes, normalizeError, isVdsError } from "./errors.ts";
 export type { ErrorCode } from "./errors.ts";
 
@@ -18,7 +29,7 @@ export { ok, fail, toResultError } from "./result.ts";
 export type { ExecutionResult, ResultError } from "./result.ts";
 
 export { ContextManager } from "./context/context.ts";
-export type { ExecutionContext, CreateContextOptions } from "./context/context.ts";
+export type { ExecutionContext, CreateContextOptions, ExecutionBudget } from "./context/context.ts";
 
 export { StateManager } from "./state/state.ts";
 export type { StateListener } from "./state/state.ts";
@@ -51,6 +62,7 @@ export type { EvalEnv } from "./logic/evaluate.ts";
 export { operators, applyOperator, operatorNames } from "./logic/operators.ts";
 export type { OpContext, OperatorImpl } from "./logic/operators.ts";
 export { resolvePath, parsePath, setPath } from "./logic/paths.ts";
+export type { PathSegment, PathResult } from "./logic/paths.ts";
 
 export {
   validateEnvelope,

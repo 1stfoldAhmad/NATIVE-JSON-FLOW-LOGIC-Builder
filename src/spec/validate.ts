@@ -153,8 +153,11 @@ function validateFunctionDefinition(d: unknown, path: string, list: ValidationIs
 
 function validateClassDefinition(d: unknown, path: string, list: ValidationIssue[]): void {
   if (!isObject(d)) return issue(list, path, "SCHEMA", "definition must be an object"), undefined;
-  if (d.lifetime !== undefined && !["singleton", "instance"].includes(d.lifetime as string))
-    issue(list, `${path}.lifetime`, "SCHEMA", "lifetime must be singleton|instance");
+  if (
+    d.lifetime !== undefined &&
+    !["singleton", "execution", "transient", "instance"].includes(d.lifetime as string)
+  )
+    issue(list, `${path}.lifetime`, "SCHEMA", "lifetime must be singleton|execution|transient|instance");
   if (d.dependencies !== undefined) {
     if (!Array.isArray(d.dependencies) || d.dependencies.some((x) => !isValidId(x)))
       issue(list, `${path}.dependencies`, "REF", "dependencies must be an array of class ids");
@@ -267,7 +270,13 @@ function validateNodeList(
       case "set":
         if (!isObject(n.assignments) || Object.keys(n.assignments).length === 0)
           issue(list, `${pp}.assignments`, "SCHEMA", "set node requires assignments");
-        else for (const k of Object.keys(n.assignments)) validateExpression(n.assignments[k], `${pp}.assignments.${k}`, list);
+        else
+          for (const k of Object.keys(n.assignments)) {
+            if (k === "__proto__" || k === "constructor" || k === "prototype") {
+              issue(list, `${pp}.assignments.${k}`, "SCHEMA", `dangerous assignment name "${k}" is not allowed`);
+            }
+            validateExpression(n.assignments[k], `${pp}.assignments.${k}`, list);
+          }
         break;
       case "callFunction":
         if (!isValidId(n.ref)) issue(list, `${pp}.ref`, "REF", "callFunction requires a function ref");

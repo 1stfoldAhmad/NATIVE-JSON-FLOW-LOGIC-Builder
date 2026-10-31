@@ -11,16 +11,17 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LogicEngine } from "../src/index.ts";
+import { loadSpecFiles } from "../src/node-io.ts";
 import { createDemoDb, registerDemoNatives } from "../examples/registration/native.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const examples = join(here, "..", "examples", "registration");
 
 const db = createDemoDb();
-const engine = new LogicEngine({ trace: true, projectId: "demo" });
+const engine = new LogicEngine({ trace: true, projectId: "demo", environment: "frontend" });
 registerDemoNatives(engine, db);
 
-engine.loadFiles([
+loadSpecFiles(engine, [
   join(examples, "logic.json"),
   join(examples, "events.json"),
   join(examples, "functions.json"),

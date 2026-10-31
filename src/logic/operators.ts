@@ -6,6 +6,7 @@
 import { ErrorCodes, VdsError } from "../errors.ts";
 import { deepEqual } from "../spec/params.ts";
 import { resolvePath } from "./paths.ts";
+import { isSafePattern } from "./regex-safety.ts";
 import { evaluate } from "./evaluate.ts";
 import type { EvalEnv } from "./evaluate.ts";
 
@@ -166,7 +167,11 @@ export const operators: Record<string, OperatorImpl> = {
   matches: (c) => {
     const value = str(c, 0);
     const pattern = str(c, 1);
-    if (pattern.length > 200) fail("regex pattern too long");
+    // ReDoS protection: statically reject unsafe patterns before compiling.
+    const verdict = isSafePattern(pattern);
+    if (!verdict.safe) {
+      fail(`unsafe regex pattern rejected: ${verdict.reason}`, { pattern });
+    }
     let re: RegExp;
     try {
       re = new RegExp(pattern);

@@ -145,6 +145,7 @@ export class HookEngine {
           input,
           signal: ctx?.signal,
           parentExecutionId: ctx?.executionId,
+          budget: ctx?.budget, // shared budget: event-driven recursion is bounded
         });
         if (!res.success) throw new VdsError(res.error!.code, res.error!.message, res.error!.details);
         return res.data;

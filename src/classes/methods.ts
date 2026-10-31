@@ -5,7 +5,7 @@
 
 import { ErrorCodes, VdsError } from "../errors.ts";
 import { validateParams } from "../spec/params.ts";
-import type { ClassRegistry } from "./registry.ts";
+import { ClassRegistry } from "./registry.ts";
 import type { FunctionExecutor } from "../functions/executor.ts";
 import type { ExecutionContext } from "../context/context.ts";
 import type { LogicEngine } from "../engine.ts";
@@ -29,6 +29,8 @@ export class MethodExecutor {
     ctx: ExecutionContext,
   ): Promise<unknown> {
     const cls = this.classes.get(classId);
+    // Runtime policy: execution-target compatibility for the class.
+    this.engine.assertTargetAllowed(cls);
     const method = (cls.definition.methods ?? []).find((m) => m.name === methodName);
     if (!method) {
       throw new VdsError(
@@ -37,7 +39,8 @@ export class MethodExecutor {
         { class: classId, method: methodName },
       );
     }
-    const instance = await this.classes.createInstance(classId, this.engine);
+    const lifetime = ClassRegistry.lifetimeOf(cls);
+    const instance = await this.classes.createInstance(classId, this.engine, ctx);
     const normalized = validateParams(method.parameters ?? [], args, `method ${classId}.${methodName}`);
     ctx.tracer?.record({
       executionId: ctx.executionId,
@@ -54,6 +57,7 @@ export class MethodExecutor {
           input: normalized,
           signal: ctx.signal,
           parentExecutionId: ctx.executionId,
+          budget: ctx.budget,
         });
         if (!res.success) {
           throw new VdsError(res.error!.code, res.error!.message, res.error!.details);
@@ -80,6 +84,9 @@ export class MethodExecutor {
         error: e instanceof Error ? e.message : String(e),
       });
       throw e;
+    } finally {
+      // Transient instances are disposed after the call.
+      if (lifetime === "transient") this.engine.disposeInstance(instance);
     }
   }
 }

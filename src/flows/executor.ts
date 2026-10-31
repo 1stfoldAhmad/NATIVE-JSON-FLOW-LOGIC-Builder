@@ -1,19 +1,22 @@
 /**
- * Flow engine — the execution backbone. Executes a compiled flow graph:
- * sequential walk with branching (if/switch), iteration (foreach, bounded),
- * function/method/subflow calls, events, error handling (try/catch, onError),
- * cancellation (AbortSignal) and timeouts.
+ * Flow engine — the execution backbone. Executes compiled flow IR
+ * (src/flows/compiler.ts): pre-resolved node links, branching (if/switch),
+ * bounded iteration (foreach with proper scoping), function/method/subflow
+ * calls, events, error handling (try/catch, onError), cancellation
+ * (AbortSignal), timeouts and a SHARED execution budget for nested/event-
+ * driven executions.
  */
 
 import { ErrorCodes, VdsError, normalizeError, isVdsError } from "../errors.ts";
 import { evaluate } from "../logic/evaluate.ts";
-import { validateParams } from "../spec/params.ts";
+import { validateParams, deepEqual } from "../spec/params.ts";
 import { checkType, typeOf } from "../spec/check.ts";
 import { fail, ok } from "../result.ts";
 import type { ExecutionResult } from "../result.ts";
-import type { FlowNode, FlowSpec } from "../spec/types.ts";
-import type { ExecutionContext } from "../context/context.ts";
+import type { FlowSpec } from "../spec/types.ts";
+import type { ExecutionContext, ExecutionBudget } from "../context/context.ts";
 import type { LogicEngine } from "../engine.ts";
+import type { CompiledNode } from "./compiler.ts";
 
 export interface ExecuteFlowOptions {
   input?: Record<string, unknown>;
@@ -24,13 +27,16 @@ export interface ExecuteFlowOptions {
   environment?: Record<string, unknown>;
   executionId?: string;
   trace?: boolean;
+  /** Shared execution budget (used for nested flows / event-driven handlers). */
+  budget?: ExecutionBudget;
 }
 
 type FlowOutcome = { kind: "continue" } | { kind: "return"; value: unknown };
 
-type Step = { action: "next"; node?: FlowNode } | { action: "return"; value: unknown };
+type Step = { action: "next"; node?: CompiledNode } | { action: "return"; value: unknown };
 
 const DEFAULT_MAX_ITERATIONS = 1000;
+const DEFAULT_NODE_BUDGET = 10000;
 
 export class FlowEngine {
   private engine: LogicEngine;
@@ -50,19 +56,19 @@ export class FlowEngine {
       if (opts.signal.aborted) ac.abort(opts.signal.reason);
       else opts.signal.addEventListener("abort", () => ac.abort(opts.signal!.reason), { once: true });
     }
-    let flow: FlowSpec | undefined;
-    let timeoutMs: number | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
 
+    let flow: FlowSpec | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let ctx: ExecutionContext | undefined;
     try {
-      // ---- resolve flow + validate input (fail before any node executes) ----
+      // ---- resolve flow, enforce target, validate input before any node runs ----
       flow = this.engine.getFlowDef(flowId);
+      this.engine.assertTargetAllowed(flow);
       const input = (opts.input ?? {}) as Record<string, unknown>;
       if (flow.definition.parameters) {
         validateParams(flow.definition.parameters, input, `flow ${flowId} input`);
       }
-      timeoutMs = opts.timeoutMs ?? flow.definition.limits?.timeoutMs;
+      const timeoutMs = opts.timeoutMs ?? flow.definition.limits?.timeoutMs;
       if (timeoutMs !== undefined && timeoutMs > 0) {
         timer = setTimeout(
           () =>
@@ -72,6 +78,9 @@ export class FlowEngine {
           timeoutMs,
         );
       }
+      // Shared budget: nested flows (callFlow) and event handlers inherit it.
+      const budget: ExecutionBudget =
+        opts.budget ?? { remaining: flow.definition.limits?.maxNodeExecutions ?? DEFAULT_NODE_BUDGET };
       ctx = cm.create({
         executionId,
         flowId,
@@ -80,14 +89,15 @@ export class FlowEngine {
         environment: opts.environment,
         signal: ac.signal,
         parentExecutionId: opts.parentExecutionId,
-        nodeBudget: flow.definition.limits?.maxNodeExecutions ?? 10000,
+        budget,
         engine: this.engine,
         tracer: this.engine.tracer.enabled || opts.trace ? this.engine.tracer : undefined,
       });
 
       this.engine.notifyExecution({ executionId, flowId, status: "running" });
       this.engine.tracer.record({ executionId, kind: "flow.start", ref: flowId });
-      const outcome = await this.runNodes(flow.definition.nodes, ctx);
+      const compiled = this.engine.getCompiledFlow(flowId);
+      const outcome = await this.runNodes([compiled.start], ctx, compiled);
       const data = outcome.kind === "return" ? outcome.value : undefined;
       const ret = flow.definition.returns;
       if (ret && data !== null && data !== undefined && !checkType(data, ret.type, ret.nullable ?? false)) {
@@ -109,16 +119,20 @@ export class FlowEngine {
         err = isVdsError(ac.signal.reason)
           ? ac.signal.reason
           : new VdsError(ErrorCodes.EXEC_CANCELLED, "Execution cancelled", {
-              reason: ac.signal.reason instanceof Error ? ac.signal.reason.message : String(ac.signal.reason ?? ""),
+              reason:
+                ac.signal.reason instanceof Error
+                  ? ac.signal.reason.message
+                  : String(ac.signal.reason ?? ""),
             });
       }
       // flow-level onError handlers run with `error` in scope; their own
       // failures are traced but never mask the original error.
       if (flow && ctx && flow.definition.onError && flow.definition.onError.length > 0) {
         try {
+          const compiled = this.engine.getCompiledFlow(flowId);
           cm.pushScope(ctx);
           cm.setLocal(ctx, "error", { code: err.code, message: err.message, details: err.details });
-          await this.runNodes(flow.definition.onError, ctx);
+          await this.runNodes(compiled.onError ?? [], ctx, compiled);
         } catch (handlerErr) {
           this.engine.tracer.record({
             executionId,
@@ -145,7 +159,11 @@ export class FlowEngine {
       return result;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
-      if (ctx) cm.dispose(ctx);
+      if (ctx) {
+        // dispose execution-scoped class instances
+        for (const instance of ctx.instances.values()) this.engine.disposeInstance(instance);
+        cm.dispose(ctx);
+      }
     }
   }
 
@@ -171,18 +189,17 @@ export class FlowEngine {
   }
 
   private spendBudget(ctx: ExecutionContext): void {
-    ctx.nodeBudget -= 1;
-    if (ctx.nodeBudget < 0) {
-      throw new VdsError(ErrorCodes.EXEC_LIMIT, "Flow node execution limit exceeded", {
-        limit: 10000,
+    ctx.budget.remaining -= 1;
+    if (ctx.budget.remaining < 0) {
+      throw new VdsError(ErrorCodes.EXEC_LIMIT, "Flow node execution budget exceeded (possible runaway loop or event recursion)", {
+        executionId: ctx.executionId,
       });
     }
   }
 
-  private async runNodes(nodes: FlowNode[], ctx: ExecutionContext): Promise<FlowOutcome> {
+  private async runNodes(nodes: CompiledNode[], ctx: ExecutionContext, flow: { nodes: Map<string, CompiledNode> }): Promise<FlowOutcome> {
     if (nodes.length === 0) return { kind: "continue" };
-    const byId = new Map(nodes.map((n) => [n.id, n]));
-    let node: FlowNode | undefined = nodes.find((n) => n.type === "start") ?? nodes[0];
+    let node: CompiledNode | undefined = nodes.find((n) => n.type === "start") ?? nodes[0];
     while (node) {
       this.throwIfCancelled(ctx);
       this.spendBudget(ctx);
@@ -193,7 +210,7 @@ export class FlowEngine {
         ref: node.type,
         details: { phase: "start" },
       });
-      const step = await this.runNode(node, byId, ctx);
+      const step = await this.runNode(node, ctx, flow);
       this.engine.tracer.record({
         executionId: ctx.executionId,
         kind: "node",
@@ -206,21 +223,15 @@ export class FlowEngine {
     return { kind: "continue" };
   }
 
-  private nextNode(byId: Map<string, FlowNode>, id: string | undefined): FlowNode | undefined {
-    if (!id) return undefined;
-    const n = byId.get(id);
-    if (!n) throw new VdsError(ErrorCodes.SPEC_INVALID, `Unknown next node "${id}"`);
-    return n;
-  }
-
   private async runNode(
-    node: FlowNode,
-    byId: Map<string, FlowNode>,
+    c: CompiledNode,
     ctx: ExecutionContext,
+    flow: { nodes: Map<string, CompiledNode> },
   ): Promise<Step> {
     const cm = this.engine.contextManager;
     const env = this.env(ctx);
-    const next = () => ({ action: "next" as const, node: this.nextNode(byId, node.next) });
+    const node = c.node;
+    const next = (): Step => ({ action: "next", node: c.next });
 
     switch (node.type) {
       case "start":
@@ -255,25 +266,24 @@ export class FlowEngine {
 
       case "if": {
         const cond = Boolean(evaluate(node.condition, env));
-        const body = cond ? node.then : (node.else ?? []);
-        const r = await this.runNodes(body, ctx);
+        const body = cond ? c.then ?? [] : c.else ?? [];
+        const r = await this.runNodes(body, ctx, flow);
         if (r.kind === "return") return { action: "return", value: r.value };
         return next();
       }
 
       case "switch": {
+        // Switch semantics: the switch value is evaluated once and compared
+        // (deep equality) against each case's `when` value, in order.
         const value = evaluate(node.value, env);
-        let body: FlowNode[] = node.default ?? [];
-        for (const c of node.cases) {
-          if (Boolean(evaluate(c.when, env))) {
-            body = c.nodes;
+        let body: CompiledNode[] = c.default ?? [];
+        for (const cs of c.cases ?? []) {
+          if (deepEqual(value, evaluate(cs.when, env))) {
+            body = cs.nodes;
             break;
           }
         }
-        // note: `when` expressions may compare against the switch value via "$.value"?
-        // cases are self-contained expressions; if a case matches, run its nodes.
-        void value;
-        const r = await this.runNodes(body, ctx);
+        const r = await this.runNodes(body, ctx, flow);
         if (r.kind === "return") return { action: "return", value: r.value };
         return next();
       }
@@ -294,31 +304,39 @@ export class FlowEngine {
           );
         }
         cm.pushScope(ctx);
+        const prevCurrent = ctx.current; // save/restore for nested loops
         try {
           for (let i = 0; i < items.length; i++) {
             this.throwIfCancelled(ctx);
             this.spendBudget(ctx);
-            cm.set(ctx, node.as, items[i]);
-            cm.set(ctx, "index", i);
+            cm.setLocal(ctx, node.as, items[i]);
+            cm.setLocal(ctx, "index", i);
             ctx.current = items[i]; // enables "@" inside the loop body
-            const r = await this.runNodes(node.body, ctx);
+            const r = await this.runNodes(c.body ?? [], ctx, flow);
             if (r.kind === "return") return { action: "return", value: r.value };
           }
         } finally {
-          ctx.current = undefined;
+          ctx.current = prevCurrent;
           cm.popScope(ctx);
         }
         return next();
       }
 
       case "emit": {
-        const payload = node.payload !== undefined ? evaluate(node.payload, env) : {};
         this.engine.tracer.record({
           executionId: ctx.executionId,
           kind: "event",
           ref: node.event,
         });
-        await this.engine.dispatch(node.event, payload, ctx);
+        // $.event is visible while the payload is evaluated and dispatched
+        const prevEvent = ctx.event;
+        ctx.event = node.event;
+        try {
+          const payload = node.payload !== undefined ? evaluate(node.payload, this.env(ctx)) : {};
+          await this.engine.dispatch(node.event, payload, ctx);
+        } finally {
+          ctx.event = prevEvent;
+        }
         return next();
       }
 
@@ -332,6 +350,7 @@ export class FlowEngine {
           input: subInput,
           signal: ctx.signal,
           parentExecutionId: ctx.executionId,
+          budget: ctx.budget, // shared budget across the execution tree
         });
         if (!res.success) {
           throw new VdsError(res.error!.code, res.error!.message, res.error!.details);
@@ -342,15 +361,15 @@ export class FlowEngine {
 
       case "try": {
         try {
-          const r = await this.runNodes(node.body, ctx);
+          const r = await this.runNodes(c.body ?? [], ctx, flow);
           if (r.kind === "return") return { action: "return", value: r.value };
         } catch (e) {
           const err = normalizeError(e);
-          if (!node.catch || node.catch.length === 0) throw err;
+          if (!c.catch || c.catch.length === 0) throw err;
           cm.pushScope(ctx);
           try {
-            cm.set(ctx, "error", { code: err.code, message: err.message, details: err.details });
-            const r = await this.runNodes(node.catch, ctx);
+            cm.setLocal(ctx, "error", { code: err.code, message: err.message, details: err.details });
+            const r = await this.runNodes(c.catch, ctx, flow);
             if (r.kind === "return") return { action: "return", value: r.value };
           } finally {
             cm.popScope(ctx);
@@ -387,7 +406,10 @@ export class FlowEngine {
 
       default: {
         const exhaustive: never = node;
-        throw new VdsError(ErrorCodes.SPEC_INVALID, `Unknown node type "${String((exhaustive as FlowNode).type)}"`);
+        throw new VdsError(
+          ErrorCodes.SPEC_INVALID,
+          `Unknown node type "${String((exhaustive as { type: string }).type)}"`,
+        );
       }
     }
   }
@@ -429,6 +451,3 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
-
-// keep FlowSpec referenced for type symmetry with the engine registry
-export type { FlowSpec };

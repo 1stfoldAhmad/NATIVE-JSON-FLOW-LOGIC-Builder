@@ -1,17 +1,16 @@
 /**
- * Expo adapter React hooks. These are thin wrappers over the core engine —
- * all execution happens in the framework-independent LogicEngine; the hooks
- * only synchronize engine state into React state and manage cleanup.
+ * Expo adapter React hooks. Thin wrappers over the framework-independent
+ * core engine — all execution happens in LogicEngine; the hooks only
+ * synchronize engine state into React state, guard against stale updates
+ * from concurrent executions, and manage cleanup on unmount.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { LogicEngine } from "../engine.ts";
 import type { ExecutionResult, ResultError } from "../result.ts";
 import type { ExecutionStatusEvent } from "../engine.ts";
-import type { ClassInstance } from "../classes/registry.ts";
 import type { EventHandler } from "../events/events.ts";
 import { LogicContext } from "./context.ts";
-import { useContext } from "react";
 
 /** Get the engine provided by LogicProvider. Throws when missing. */
 export function useEngine(): LogicEngine {
@@ -20,6 +19,11 @@ export function useEngine(): LogicEngine {
     throw new Error("useEngine must be used inside a <LogicProvider>");
   }
   return engine;
+}
+
+/** The engine from context — context values are already stable; no memo needed. */
+export function useLogicEngine(): LogicEngine {
+  return useEngine();
 }
 
 export interface FlowHandle {
@@ -31,10 +35,11 @@ export interface FlowHandle {
   executionId: string | null;
 }
 
-/** Execute and observe a JSON flow. */
+/** Execute and observe a JSON flow. Stale executions never overwrite newer state. */
 export function useFlow(flowId: string): FlowHandle {
   const engine = useEngine();
   const abortRef = useRef<AbortController | null>(null);
+  const execCounter = useRef(0);
   const [state, setState] = useState<{
     loading: boolean;
     error: ResultError | null;
@@ -47,17 +52,21 @@ export function useFlow(flowId: string): FlowHandle {
       abortRef.current?.abort();
       const ac = new AbortController();
       abortRef.current = ac;
+      const execId = ++execCounter.current;
       setState((s) => ({ ...s, loading: true, error: null }));
       const res = await engine.executeFlow(flowId, {
         input: opts?.input ?? {},
         signal: ac.signal,
       });
-      setState({
-        loading: false,
-        error: res.success ? null : res.error ?? null,
-        result: res.data,
-        executionId: res.executionId,
-      });
+      if (execCounter.current === execId) {
+        // only the latest execution may update state
+        setState({
+          loading: false,
+          error: res.success ? null : res.error ?? null,
+          result: res.data,
+          executionId: res.executionId,
+        });
+      }
       return res;
     },
     [engine, flowId],
@@ -79,42 +88,45 @@ export interface FlowState {
   error?: ResultError;
 }
 
-/** Observe the latest execution status of a flow. */
+function toFlowState(e: ExecutionStatusEvent): FlowState {
+  return {
+    status: e.status,
+    executionId: e.executionId,
+    ...(e.result?.success ? { result: e.result.data } : { error: e.result?.error }),
+  };
+}
+
+/** Observe the latest execution status of a flow (initialized from tracked history). */
 export function useFlowState(flowId: string): FlowState | null {
   const engine = useEngine();
-  const [state, setState] = useState<FlowState | null>(null);
+  const [state, setState] = useState<FlowState | null>(() => {
+    const tracked = engine
+      .listExecutions()
+      .filter((e) => e.flowId === flowId)
+      .at(-1);
+    return tracked ? toFlowState(tracked) : null;
+  });
   useEffect(() => {
-    return engine.subscribeExecutions((e: ExecutionStatusEvent) => {
-      if (e.flowId === flowId && e.status !== "running") {
-        setState({
-          status: e.status,
-          executionId: e.executionId,
-          ...(e.result?.success
-            ? { result: e.result.data }
-            : { error: e.result?.error }),
-        });
-      } else if (e.flowId === flowId) {
-        setState({ status: "running", executionId: e.executionId });
-      }
+    return engine.subscribeExecutions((e) => {
+      if (e.flowId === flowId) setState(toFlowState(e));
     });
   }, [engine, flowId]);
   return state;
 }
 
-/** Observe one specific execution by id. */
+/** Observe one specific execution by id (initialized from tracked history). */
 export function useExecution(executionId: string | null): FlowState | null {
   const engine = useEngine();
-  const [state, setState] = useState<FlowState | null>(null);
+  const [state, setState] = useState<FlowState | null>(() => {
+    const tracked = executionId ? engine.getExecution(executionId) : undefined;
+    return tracked ? toFlowState(tracked) : null;
+  });
   useEffect(() => {
     if (!executionId) return;
+    const tracked = engine.getExecution(executionId);
+    if (tracked) setState(toFlowState(tracked));
     return engine.subscribeExecutions((e) => {
-      if (e.executionId === executionId && e.status !== "running") {
-        setState({
-          status: e.status,
-          executionId: e.executionId,
-          ...(e.result?.success ? { result: e.result.data } : { error: e.result?.error }),
-        });
-      }
+      if (e.executionId === executionId) setState(toFlowState(e));
     });
   }, [engine, executionId]);
   return state;
@@ -127,9 +139,10 @@ export interface LogicHandle {
   data: unknown;
 }
 
-/** Execute a reusable JSON logic function. */
+/** Execute a reusable JSON logic function. Stale executions never overwrite newer state. */
 export function useLogic(functionId: string): LogicHandle {
   const engine = useEngine();
+  const execCounter = useRef(0);
   const [state, setState] = useState<{ loading: boolean; error: ResultError | null; data: unknown }>({
     loading: false,
     error: null,
@@ -137,9 +150,12 @@ export function useLogic(functionId: string): LogicHandle {
   });
   const execute = useCallback(
     async (args: Record<string, unknown> = {}) => {
+      const execId = ++execCounter.current;
       setState((s) => ({ ...s, loading: true, error: null }));
       const res = await engine.callFunction(functionId, args);
-      setState({ loading: false, error: res.success ? null : res.error ?? null, data: res.data });
+      if (execCounter.current === execId) {
+        setState({ loading: false, error: res.success ? null : res.error ?? null, data: res.data });
+      }
       return res;
     },
     [engine, functionId],
@@ -147,20 +163,35 @@ export function useLogic(functionId: string): LogicHandle {
   return { execute, ...state };
 }
 
-/** Access a registered service class instance. */
-export function useService(classId: string): ClassInstance | null {
+/**
+ * Service facade: invoke JSON-defined methods on a registered class,
+ * e.g. `const userService = useService("class.user-service");
+ * await userService.findUser({ email })`. Internal instance details stay private.
+ */
+export type ServiceFacade = {
+  readonly classId: string;
+  invoke: (method: string, args?: Record<string, unknown>) => Promise<ExecutionResult>;
+} & Record<string, unknown>;
+
+export function useService(classId: string): ServiceFacade | null {
   const engine = useEngine();
-  const [service, setService] = useState<ClassInstance | null>(null);
-  useEffect(() => {
-    let alive = true;
-    engine.getService(classId).then((s) => {
-      if (alive) setService(s);
-    });
-    return () => {
-      alive = false;
+  return useMemo<ServiceFacade | null>(() => {
+    const base = {
+      classId,
+      invoke: (method: string, args: Record<string, unknown> = {}) =>
+        engine.callMethod(classId, method, args),
     };
+    return new Proxy(base, {
+      get(target, prop) {
+        if (prop in target) return (target as Record<string | symbol, unknown>)[prop];
+        if (typeof prop === "string") {
+          // service.someMethod(args) -> engine.callMethod(classId, "someMethod", args)
+          return (args: Record<string, unknown> = {}) => engine.callMethod(classId, prop, args);
+        }
+        return undefined;
+      },
+    }) as ServiceFacade;
   }, [engine, classId]);
-  return service;
 }
 
 /** Subscribe to engine events (flow events, domain events, "*"). Cleans up automatically. */
@@ -181,16 +212,19 @@ export function useFlowSubscription(event: string, handler: EventHandler): void 
 /**
  * Connect Expo app lifecycle events to the engine as JSON hook triggers
  * (app.start / app.foreground / app.background). Uses react-native's
- * AppState when available; safe no-op outside React Native.
+ * AppState when available; safe no-op outside React Native. The async
+ * import is guarded so a late resolution after unmount attaches nothing.
  */
 export function useAppLifecycle(): void {
   const engine = useEngine();
   useEffect(() => {
-    void engine.dispatch("app.start", { at: Date.now() });
+    let alive = true;
     let subscription: { remove(): void } | undefined;
+    void engine.dispatch("app.start", { at: Date.now() });
     void (async () => {
       try {
         const RN = await import("react-native");
+        if (!alive) return;
         subscription = RN.AppState.addEventListener("change", (state) => {
           const event = state === "active" ? "app.foreground" : "app.background";
           void engine.dispatch(event, { state, at: Date.now() });
@@ -199,11 +233,9 @@ export function useAppLifecycle(): void {
         // not running inside React Native — lifecycle hooks stay unused
       }
     })();
-    return () => subscription?.remove();
+    return () => {
+      alive = false;
+      subscription?.remove();
+    };
   }, [engine]);
-}
-
-/** Memoized engine reference (convenience). */
-export function useLogicEngine(): LogicEngine {
-  return useMemo(() => useEngine(), []);
 }

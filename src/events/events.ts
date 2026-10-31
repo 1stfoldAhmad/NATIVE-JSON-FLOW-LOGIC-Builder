@@ -48,15 +48,20 @@ export class EventManager {
   async emit(event: string, payload: unknown, ctx?: ExecutionContext): Promise<unknown[]> {
     const set = this.handlers.get(event);
     const wildcard = this.handlers.get("*");
-    const subs = [...(set ?? []), ...(wildcard ?? [])];
+    // Track the actual set each subscription came from so `once` cleanup
+    // removes it from the right set (wildcard handlers live in the "*" set).
+    const subs: Array<{ sub: Subscription; set: Set<Subscription> }> = [
+      ...[...(set ?? [])].map((sub) => ({ sub, set: set! })),
+      ...[...(wildcard ?? [])].map((sub) => ({ sub, set: wildcard! })),
+    ];
     const results: unknown[] = [];
-    for (const sub of subs) {
+    for (const { sub, set: owner } of subs) {
       try {
         results.push(await sub.fn(payload, ctx));
       } catch (e) {
         throw normalizeError(e);
       } finally {
-        if (sub.once) set?.delete(sub);
+        if (sub.once) owner.delete(sub);
       }
     }
     return results;

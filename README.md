@@ -41,22 +41,28 @@ implemented and tested (see `examples/registration` and `tests/registration.test
 
 ```
 src/
-  spec/       JSON envelope, type system, schema + semantic validation
-  logic/      controlled expression language: paths ($.items[*].price, @), operators, evaluator
-  functions/  function registry + executor (kinds: pure/native/async/flow/...)
-  classes/    class registry (lifetimes, dependency injection) + method executor
-  flows/      flow engine: graph walk, if/switch/foreach/try, callFlow, emit, cancellation, timeouts
+  spec/       JSON envelope, type system, schema + semantic validation, pure doc parsing
+  logic/      controlled expression language: hardened paths, safe-regex analyzer,
+              operator registry, evaluator
+  functions/  function registry + executor (kinds, target + capability gates)
+  classes/    class registry (singleton/execution/transient lifetimes, disposal,
+              dependency injection) + method executor
+  flows/      compiler (normalized IR with pre-resolved links) + executor:
+              if/switch/foreach/try, callFlow, emit, cancellation, timeouts,
+              shared execution budget
   hooks/      JSON hook engine (ordering, sequential/parallel, stopOnError)
-  events/     programmatic event bus (on/off/emit)
-  context/    execution context + variable scopes
-  state/      application state store (observable)
-  deps/       dependency resolver: missing refs + circular dependency detection
-  trace/      execution tracer
-  engine.ts   LogicEngine facade — the whole public core API
-  expo/       thin Expo/React adapter: LogicProvider, useFlow, useLogic, useService, ...
+  events/     programmatic event bus (correct once/wildcard cleanup)
+  context/    execution context, scopes, namespaces, pollution-safe writes
+  state/      application state store (observable, pollution-safe paths)
+  deps/       dependency resolver: missing refs, WRONG-TYPE refs, cycles,
+              event-recursion (EVENT_CYCLE), strict event contracts
+  trace/      execution tracer (records ids/refs only — never payloads)
+  engine.ts   LogicEngine facade — the whole public core API (ZERO node:* imports)
+  node-io.ts  Node-only entry ("vds-json-logic/node"): filesystem spec loading
+  expo/       thin Expo/React adapter: LogicProvider, createExpoEngine, hooks
 examples/registration/   JSON specs + demo natives for the registration workflow
-scripts/demo.ts          runnable demo (plain Node): node scripts/demo.ts
-tests/                   node:test suite (71 tests)
+scripts/demo.ts          runnable demo (plain Node): npm run demo
+tests/                   node:test suite (98 tests incl. security/policy regressions)
 ```
 
 ## Quick start (core, no React)
@@ -70,11 +76,13 @@ const engine = new LogicEngine({ trace: true });
 // notifications, storage). JSON itself can never execute code.
 engine.registerNative("userApi.findByEmail", async (args) => { /* fetch */ });
 
-// Load JSON specs (one batch so cross-file references resolve before validation)
-engine.loadFiles([
-  "specs/logic.json", "specs/functions.json", "specs/classes.json",
-  "specs/hooks.json", "specs/flows.json", "specs/events.json",
-]);
+// In-app, load already-bundled JSON (one transactional batch so cross-file
+// references resolve before validation):
+engine.loadJson(bundledSpecs); // envelope | envelope[] | { functions: [...], flows: [...], ... }
+
+// In Node tooling/tests, filesystem loading lives in the separate /node entry:
+//   import { loadSpecFiles } from "vds-json-logic/node";
+//   loadSpecFiles(engine, ["specs/logic.json", "specs/functions.json", ...]);
 
 // Non-React APIs
 const result = await engine.executeFlow("flow.user.registration", {
@@ -203,11 +211,48 @@ input/output validation.
   `EXEC_TIMEOUT`, `EXEC_LIMIT`, ...), execution trace IDs, cancellation, timeouts,
   loop/recursion budgets, cleanup of subscriptions and class instances.
 
+## Security & runtime policy (hardened)
+
+- **Portable core** — `src/index.ts`/`src/engine.ts` never import `node:*` built-ins
+  (enforced by a regression test), so the package bundles in Expo/Metro. Filesystem
+  loading lives only in the separate `vds-json-logic/node` entry (`loadSpecFile(s)`).
+  Execution IDs use `crypto.randomUUID` when available with a portable fallback.
+- **No arbitrary code** — expressions are interpreted by a fixed operator registry;
+  `__proto__`/`constructor` are rejected even as operator names.
+- **Prototype-pollution-safe paths** — path segments `__proto__`, `constructor`,
+  `prototype` are rejected by the parser; reads use own-property checks only;
+  `setPath`/state writes and flow `set` assignments refuse dangerous names.
+- **ReDoS-safe `matches`** — JSON-supplied regex patterns are statically analyzed
+  (`isSafePattern`): nested quantifiers (`(a+)+`), quantified alternation (`(a|a)*`),
+  backreferences and >200-char patterns are rejected before compilation.
+- **Execution-target enforcement** — `new LogicEngine({ environment: "frontend" })`
+  (the default; `createExpoEngine()` does this) refuses to run definitions whose
+  `execution.target` is `backend` (`NOT_ALLOWED`). The backend stays authoritative.
+- **Capability gate** — `registerNative(name, impl, { capabilities: [...] })` declares
+  what a native may do; function definitions declare required capabilities in
+  `execution.capabilities`; the engine policy (`grantCapability`) can grant more.
+  Missing capability → `NOT_ALLOWED` before the call.
+- **Transactional loading** — `load()` stages definitions, validates the complete
+  graph (missing refs, wrong-type refs, cycles, event recursion), and only then
+  commits. A failed load leaves the engine untouched.
+- **Event contracts** — payloads are validated against registered `events.json`
+  definitions on dispatch; `strictEvents: true` requires emit nodes and hook
+  triggers to name registered events; event→hook→flow→emit cycles are detected
+  (`EVENT_CYCLE`) and nested/event-driven executions share one execution budget.
+- **Flow semantics** — `switch` evaluates its value once and deep-compares it to
+  each case's `when` (first match wins, `default` otherwise); `foreach` binds the
+  item/index in a local scope and restores `@` after nested loops; flows execute
+  through a compiled IR cached per flow id+version.
+- **Class lifetimes** — `singleton` (per engine), `execution` (per flow execution,
+  disposed with it), `transient` (per call, disposed after).
+- **Context namespaces** — `$.input`, `$.variables`, `$.user`, `$.environment`,
+  `$.state`, `$.event` are explicit namespaces alongside merged flow data.
+
 ## Scripts
 
 ```bash
 npm install
-npm test          # node --test (71 tests, plain Node — core needs no React)
+npm test          # node --test (98 tests, plain Node — core needs no React)
 npm run demo      # end-to-end registration demo
 npm run typecheck # tsc --noEmit over src + tests + examples
 npm run build     # emit dist/ (core + ./expo entry)
