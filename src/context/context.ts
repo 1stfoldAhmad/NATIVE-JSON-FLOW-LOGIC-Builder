@@ -119,9 +119,11 @@ export class ContextManager {
       },
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       budget: opts.budget ?? { remaining: opts.nodeBudget ?? 10000 },
-      // clone per context: remainingNodes is mutable and must not leak across executions
+      // V2.1-B: a provided budget is the SHARED mutable object (nested flows pass
+      // theirs through); only the engine default is cloned fresh per context so
+      // remainingNodes never leaks across independent top-level executions.
       evaluationBudget: opts.evaluationBudget
-        ? { ...opts.evaluationBudget }
+        ? opts.evaluationBudget
         : { ...opts.engine.evaluationBudget, remainingNodes: opts.engine.evaluationBudget.maxNodes },
       localNodeLimit: opts.nodeBudget ?? 10000,
       localSpent: 0,

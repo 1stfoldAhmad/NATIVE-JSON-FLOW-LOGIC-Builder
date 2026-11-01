@@ -213,7 +213,10 @@ export class LogicEngine {
       this.classes.dispose(instance);
     }
     ctx.instances.clear();
-    this.disposeContext(ctx);
+    // delegate to the context manager's low-level cleanup (scopes/variables);
+    // calling this.disposeContext again here would be a (guarded) self-call
+    // that never runs the cleanup below.
+    this.contextManager.dispose(ctx);
   }
 
   // ------------------------------------------------------------------
