@@ -62,7 +62,7 @@ src/
   expo/       thin Expo/React adapter: LogicProvider, createExpoEngine, hooks
 examples/registration/   JSON specs + demo natives for the registration workflow
 scripts/demo.ts          runnable demo (plain Node): npm run demo
-tests/                   node:test suite (147 tests incl. security/policy regressions)
+tests/                   node:test suite (156 tests incl. security/policy regressions)
 ```
 
 ## Quick start (core, no React)
@@ -299,7 +299,7 @@ input/output validation.
 
 ```bash
 npm install
-npm test          # tsx --test (147 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
+npm test          # tsx --test (156 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
 npm run demo      # end-to-end registration demo
 npm run typecheck # tsc --noEmit over src + tests + examples (examples/expo-app has its own tsconfig — run tsc there after its npm install)
 npm run build     # emit dist/ (core + ./expo + ./node entries)

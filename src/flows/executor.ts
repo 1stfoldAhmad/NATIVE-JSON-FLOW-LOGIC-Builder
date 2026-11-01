@@ -67,6 +67,7 @@ export class FlowEngine {
     let flow: FlowSpec | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let ctx: ExecutionContext | undefined;
+    let failure: VdsError | null = null; // V2.1-C: set on error/cancel/timeout paths
     try {
       // ---- resolve flow, enforce target, validate input before any node runs ----
       flow = this.engine.getFlowDef(flowId);
@@ -97,8 +98,9 @@ export class FlowEngine {
         signal: ac.signal,
         parentExecutionId: opts.parentExecutionId,
         budget,
-        // F6: the evaluation budget is shared with nested flows/expressions.
-        evaluationBudget: opts.evaluationBudget ? { ...opts.evaluationBudget } : undefined,
+        // V2.1-B: the evaluation budget is SHARED (same mutable object) with
+        // nested flows - do not clone here, or each child gets its own counter.
+        evaluationBudget: opts.evaluationBudget,
         // F-08: a flow's own maxNodeExecutions is a LOCAL limit; the strictest
         // of the shared inherited budget and this local limit is enforced.
         nodeBudget: flow.definition.limits?.maxNodeExecutions ?? DEFAULT_NODE_BUDGET,
@@ -137,11 +139,13 @@ export class FlowEngine {
                   : String(ac.signal.reason ?? ""),
             });
       }
-      // Lifecycle handlers (audit §3): onError for ordinary failures;
-      // onCancel/onTimeout for cancellation/timeout; onFinally always.
-      // Cancel/timeout handlers run with a FRESH cleanup signal so an aborted
-      // original signal does not block cleanup work; they still share the
-      // execution budget and can never restart normal business execution.
+      failure = err;
+      // Lifecycle handlers (audit §3 + V2.1-C): onError for ordinary failures;
+      // onCancel/onTimeout for cancellation/timeout. onFinally is NOT run here -
+      // it runs exactly once in the finally block on every outcome (including
+      // success). Cancel/timeout handlers run with a FRESH cleanup signal so an
+      // aborted original signal does not block cleanup work; they still share
+      // the execution budget and can never restart normal business execution.
       if (flow && ctx) {
         const compiled = this.engine.getCompiledFlow(flowId);
         const isTimeout = err.code === ErrorCodes.EXEC_TIMEOUT;
@@ -150,7 +154,6 @@ export class FlowEngine {
         if (!isCancel && !isTimeout) handlers.push({ nodes: compiled.onError, label: "onError", cleanupSignal: false });
         if (isCancel) handlers.push({ nodes: compiled.onCancel, label: "onCancel", cleanupSignal: true });
         if (isTimeout) handlers.push({ nodes: compiled.onTimeout, label: "onTimeout", cleanupSignal: true });
-        handlers.push({ nodes: compiled.onFinally, label: "onFinally", cleanupSignal: isCancel || isTimeout });
         for (const h of handlers) {
           if (!h.nodes || h.nodes.length === 0) continue;
           const cleanupAc = h.cleanupSignal ? new AbortController() : undefined;
@@ -192,6 +195,40 @@ export class FlowEngine {
       // F4: always remove the parent-signal listener.
       if (opts.signal && onParentAbort) opts.signal.removeEventListener("abort", onParentAbort);
       this.engine.untrackController(ac);
+      // V2.1-C: onFinally runs exactly once on EVERY outcome - success, error,
+      // cancellation, timeout. On cancel/timeout it gets a fresh cleanup signal
+      // so the aborted original signal cannot block it. Its failures are
+      // traced but never mask the outcome.
+      if (flow && ctx) {
+        try {
+          const compiled = this.engine.getCompiledFlow(flowId);
+          if (compiled.onFinally && compiled.onFinally.length > 0) {
+            const needsCleanupSignal =
+              failure !== null &&
+              (failure.code === ErrorCodes.EXEC_CANCELLED || failure.code === ErrorCodes.EXEC_TIMEOUT);
+            const cleanupAc = needsCleanupSignal ? new AbortController() : undefined;
+            const prevSignal = ctx.signal;
+            try {
+              cm.pushScope(ctx);
+              if (failure) cm.setLocal(ctx, "error", { code: failure.code, message: failure.message, details: failure.details });
+              if (cleanupAc) ctx.signal = cleanupAc.signal;
+              await this.runNodes(compiled.onFinally, ctx, compiled);
+            } catch (handlerErr) {
+              this.engine.tracer.record({
+                executionId,
+                kind: "error",
+                ref: `${flowId}#onFinally`,
+                error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
+              });
+            } finally {
+              ctx.signal = prevSignal;
+              cm.popScope(ctx);
+            }
+          }
+        } catch {
+          // a broken compiled flow must never break cleanup
+        }
+      }
       // F2: centralized, idempotent context cleanup (disposes execution-owned
       // class instances exactly once, preserves singletons, clears scopes).
       if (ctx) this.engine.disposeContext(ctx);
