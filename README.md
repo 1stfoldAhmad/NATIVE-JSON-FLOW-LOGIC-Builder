@@ -62,7 +62,7 @@ src/
   expo/       thin Expo/React adapter: LogicProvider, createExpoEngine, hooks
 examples/registration/   JSON specs + demo natives for the registration workflow
 scripts/demo.ts          runnable demo (plain Node): npm run demo
-tests/                   node:test suite (112 tests incl. security/policy regressions)
+tests/                   node:test suite (127 tests incl. security/policy regressions)
 ```
 
 ## Quick start (core, no React)
@@ -270,11 +270,21 @@ input/output validation.
 
 ```bash
 npm install
-npm test          # tsx --test (112 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
+npm test          # tsx --test (127 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
 npm run demo      # end-to-end registration demo
 npm run typecheck # tsc --noEmit over src + tests + examples (examples/expo-app has its own tsconfig — run tsc there after its npm install)
-npm run build     # emit dist/ (core + ./expo entry)
+npm run build     # emit dist/ (core + ./expo + ./node entries)
+npm run smoke     # verify the built package's export map (used by CI)
 ```
+
+## CI
+
+`.github/workflows/ci.yml` runs on every PR and push to `main` (Node 20 + 22):
+install → typecheck → tests → build → dist export smoke (`npm run smoke`) →
+`npm pack --dry-run` → Expo/Metro guard (fails if the portable core imports
+`node:*` outside `src/node-io.ts`) → demo. The Expo example app itself
+(`examples/expo-app`) is verified on a device/emulator per its README — Metro
+bundling cannot run in this CI.
 
 ## Roadmap (from the VDS plan)
 

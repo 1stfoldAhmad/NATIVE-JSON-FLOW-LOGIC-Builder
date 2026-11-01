@@ -249,7 +249,27 @@ export class DependencyResolver {
           break;
         }
         case "class": {
-          for (const dep of (d.dependencies as string[] | undefined) ?? []) expectType(def.id, dep, "class");
+          // Lifetime compatibility (audit F1): a longer-lived instance must
+          // never capture a shorter-lived dependency — the dependency would be
+          // disposed while the dependent stays cached. singleton(3) may only
+          // depend on singleton; execution(2) on execution|singleton;
+          // transient(1) on anything.
+          const lifetimeRank = (lt: unknown): number =>
+            lt === "execution" ? 2 : lt === "singleton" || lt === undefined ? 3 : 1;
+          const ownRank = lifetimeRank(d.lifetime);
+          for (const dep of (d.dependencies as string[] | undefined) ?? []) {
+            expectType(def.id, dep, "class");
+            const depDef = byId.get(dep);
+            const depLt = (depDef?.definition as Record<string, unknown> | undefined)?.lifetime;
+            const depRank = lifetimeRank(depLt);
+            if (depRank < ownRank) {
+              throw new VdsError(
+                ErrorCodes.LIFETIME_INCOMPATIBLE,
+                `class "${def.id}" (lifetime ${String(d.lifetime ?? "singleton")}) must not depend on shorter-lived class "${dep}" (lifetime ${String(depLt ?? "singleton")})`,
+                { from: def.id, ref: dep },
+              );
+            }
+          }
           for (const m of (d.methods as Array<Record<string, unknown>> | undefined) ?? []) {
             if (typeof m.function === "string") expectType(def.id, m.function, "function");
             if (typeof m.flow === "string") expectType(def.id, m.flow, "flow");

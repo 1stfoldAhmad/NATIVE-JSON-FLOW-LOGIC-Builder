@@ -96,17 +96,23 @@ function toFlowState(e: ExecutionStatusEvent): FlowState {
   };
 }
 
+/** Latest tracked execution status of a flow, or null (pure helper, testable without React). */
+export function flowStateFromHistory(engine: LogicEngine, flowId: string): FlowState | null {
+  const tracked = engine
+    .listExecutions()
+    .filter((e) => e.flowId === flowId)
+    .at(-1);
+  return tracked ? toFlowState(tracked) : null;
+}
+
 /** Observe the latest execution status of a flow (initialized from tracked history). */
 export function useFlowState(flowId: string): FlowState | null {
   const engine = useEngine();
-  const [state, setState] = useState<FlowState | null>(() => {
-    const tracked = engine
-      .listExecutions()
-      .filter((e) => e.flowId === flowId)
-      .at(-1);
-    return tracked ? toFlowState(tracked) : null;
-  });
+  const [state, setState] = useState<FlowState | null>(() => flowStateFromHistory(engine, flowId));
   useEffect(() => {
+    // Audit F5: when flowId changes, re-sync from the new flow's history so the
+    // previous flow's state is never exposed, then subscribe to updates.
+    setState(flowStateFromHistory(engine, flowId));
     return engine.subscribeExecutions((e) => {
       if (e.flowId === flowId) setState(toFlowState(e));
     });

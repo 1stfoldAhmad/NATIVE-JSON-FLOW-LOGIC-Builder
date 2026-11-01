@@ -26,12 +26,14 @@ export class StateManager {
   }
 
   set(path: string, value: unknown): void {
-    setPath(this.state, path.startsWith("$") ? path : `$.${path}`, value);
+    // Clone incoming values: callers must not be able to mutate internal
+    // state by holding a reference to a nested object they passed in.
+    setPath(this.state, path.startsWith("$") ? path : `$.${path}`, cloneState(value));
     this.notify();
   }
 
   replace(state: Record<string, unknown>): void {
-    this.state = { ...state };
+    this.state = cloneState(state);
     this.notify();
   }
 
