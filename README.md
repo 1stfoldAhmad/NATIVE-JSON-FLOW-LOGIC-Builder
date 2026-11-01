@@ -62,7 +62,7 @@ src/
   expo/       thin Expo/React adapter: LogicProvider, createExpoEngine, hooks
 examples/registration/   JSON specs + demo natives for the registration workflow
 scripts/demo.ts          runnable demo (plain Node): npm run demo
-tests/                   node:test suite (127 tests incl. security/policy regressions)
+tests/                   node:test suite (147 tests incl. security/policy regressions)
 ```
 
 ## Quick start (core, no React)
@@ -265,12 +265,41 @@ input/output validation.
 - **Nested budget semantics** — every flow's `limits.maxNodeExecutions` is a LOCAL
   limit on top of the shared tree-wide budget; the strictest applicable limit wins
   (`EXEC_LIMIT`).
+- **Explicit dependency ownership** — class instances record their owner
+  (`engine` / `context` / creator). Disposal only disposes owned instances:
+  disposing a transient never kills an execution-scoped or singleton dependency
+  (`LIFETIME_INCOMPATIBLE` guards both load time and runtime).
+- **Centralized context cleanup** — `engine.disposeContext(ctx)` disposes
+  execution-owned instances exactly once, preserves singletons and is idempotent;
+  all public entry points use it. `engine.dispose()` is a full shutdown lifecycle:
+  reject new work, abort active executions, wait up to `shutdownTimeoutMs`, then
+  dispose singletons and clear listeners/caches.
+- **Lifecycle handlers** — flows support `onError` (ordinary failures),
+  `onCancel` / `onTimeout` (run with a fresh cleanup signal so an aborted signal
+  cannot block cleanup) and `onFinally` (always runs). Handler failures never
+  mask the original error.
+- **Expression evaluation budgets** — `evaluation: { maxNodes, maxDepth,
+  maxCollectionItems, maxStringLength }` engine option bounds expression depth,
+  node count, collection sizes and string lengths (`EVAL_LIMIT`), shared across
+  one execution's nested expressions and nested flows.
+- **Sequential-only hooks** — `execution.mode: "parallel"` on hooks is rejected at
+  load time (shared-context data race); handlers always run sequentially in
+  declared order.
+- **Complete reference validation** — `logic` references are collected from every
+  expression-bearing field (flow node conditions/assignments/args/payloads, hook
+  handler args/inputs, function/logic definitions) and validated at load time.
+- **Stricter validation contracts** — methods must reference exactly one of
+  function/flow; `execution.capabilities` must be an array of non-empty strings;
+  parameter names reject dangerous keys and defaults/enum values must match the
+  declared type; flow `limits` values are validated; unknown operators are
+  rejected at load; `additionalProperties: "allow"|"strip"|"reject"` engine option
+  governs unknown envelope fields.
 
 ## Scripts
 
 ```bash
 npm install
-npm test          # tsx --test (127 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
+npm test          # tsx --test (147 tests; tsx runs the TS tests on Node >=18 — core dist needs no React)
 npm run demo      # end-to-end registration demo
 npm run typecheck # tsc --noEmit over src + tests + examples (examples/expo-app has its own tsconfig — run tsc there after its npm install)
 npm run build     # emit dist/ (core + ./expo + ./node entries)
@@ -282,9 +311,10 @@ npm run smoke     # verify the built package's export map (used by CI)
 `.github/workflows/ci.yml` runs on every PR and push to `main` (Node 20 + 22):
 install → typecheck → tests → build → dist export smoke (`npm run smoke`) →
 `npm pack --dry-run` → Expo/Metro guard (fails if the portable core imports
-`node:*` outside `src/node-io.ts`) → demo. The Expo example app itself
-(`examples/expo-app`) is verified on a device/emulator per its README — Metro
-bundling cannot run in this CI.
+`node:*` outside `src/node-io.ts`) → demo. A separate `expo-bundle` job runs
+`npx expo export` on `examples/expo-app`, so Metro bundling of the core + `./expo`
+adapter is verified automatically; on-device behavior is still verified per the
+example's README.
 
 ## Roadmap (from the VDS plan)
 

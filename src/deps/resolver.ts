@@ -241,9 +241,11 @@ export class DependencyResolver {
       switch (def.type) {
         case "function": {
           if (typeof d.flow === "string") expectType(def.id, d.flow, "flow");
-          if (d.expression !== undefined) {
+          // F5: collect logic refs from every expression-bearing field, not
+          // just d.expression (covers return expressions, args, etc.)
+          {
             const logicRefs = new Set<string>();
-            collectLogicRefs(d.expression as Expression, logicRefs);
+            collectLogicRefs(d, logicRefs);
             for (const r of logicRefs) expectType(def.id, r, "logic");
           }
           break;
@@ -278,6 +280,12 @@ export class DependencyResolver {
         }
         case "hook": {
           checkEventName(def.id, (d.trigger as { event: string }).event);
+          // F5: hook handler args/input are expressions too
+          {
+            const logicRefs = new Set<string>();
+            collectLogicRefs(d, logicRefs);
+            for (const r of logicRefs) expectType(def.id, r, "logic");
+          }
           for (const h of (d.handlers as Array<Record<string, unknown>> | undefined) ?? []) {
             if (h.type === "method") {
               checkMethod(def.id, h.class, h.method);
@@ -290,14 +298,22 @@ export class DependencyResolver {
         case "flow": {
           walkFlowNodes(def.id, d.nodes as FlowNode[] | undefined);
           walkFlowNodes(def.id, d.onError as FlowNode[] | undefined);
+          walkFlowNodes(def.id, d.onCancel as FlowNode[] | undefined);
+          walkFlowNodes(def.id, d.onTimeout as FlowNode[] | undefined);
+          walkFlowNodes(def.id, d.onFinally as FlowNode[] | undefined);
+          // F5: validate logic refs inside ALL expression-bearing node fields
+          // (conditions, assignments, args, inputs, payloads, values, ...)
+          {
+            const logicRefs = new Set<string>();
+            collectLogicRefs(d, logicRefs);
+            for (const r of logicRefs) expectType(def.id, r, "logic");
+          }
           break;
         }
         case "logic": {
-          if (d.expression !== undefined) {
-            const logicRefs = new Set<string>();
-            collectLogicRefs(d.expression as Expression, logicRefs);
-            for (const r of logicRefs) expectType(def.id, r, "logic");
-          }
+          const logicRefs = new Set<string>();
+          collectLogicRefs(d, logicRefs);
+          for (const r of logicRefs) expectType(def.id, r, "logic");
           break;
         }
         default:

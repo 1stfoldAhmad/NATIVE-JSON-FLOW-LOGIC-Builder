@@ -37,6 +37,9 @@ export interface CompiledFlow {
   start: CompiledNode;
   nodes: Map<string, CompiledNode>;
   onError?: CompiledNode[];
+  onCancel?: CompiledNode[];
+  onTimeout?: CompiledNode[];
+  onFinally?: CompiledNode[];
 }
 
 function compileNodes(nodes: FlowNode[], flowId: string): CompiledNode[] {
@@ -95,5 +98,8 @@ export function compileFlow(def: FlowSpec): CompiledFlow {
     start,
     nodes: new Map(nodes.map((n) => [n.id, n])),
     onError: def.definition.onError ? compileNodes(def.definition.onError, def.id) : undefined,
+    onCancel: def.definition.onCancel ? compileNodes(def.definition.onCancel, def.id) : undefined,
+    onTimeout: def.definition.onTimeout ? compileNodes(def.definition.onTimeout, def.id) : undefined,
+    onFinally: def.definition.onFinally ? compileNodes(def.definition.onFinally, def.id) : undefined,
   };
 }

@@ -13,7 +13,7 @@
 import { ErrorCodes, VdsError, normalizeError } from "./errors.ts";
 import { ok, fail, toResultError } from "./result.ts";
 import type { ExecutionResult } from "./result.ts";
-import { assertValidDefinition, validateDefinition } from "./spec/validate.ts";
+import { applyEnvelopePolicy, assertValidDefinition, validateDefinition } from "./spec/validate.ts";
 import { parseSpecDocument } from "./spec/load.ts";
 import { validateParams } from "./spec/params.ts";
 import type {
@@ -29,7 +29,7 @@ import type {
 } from "./spec/types.ts";
 import { evaluate } from "./logic/evaluate.ts";
 import { ContextManager } from "./context/context.ts";
-import type { ExecutionContext, ExecutionBudget } from "./context/context.ts";
+import type { EvaluationBudget, ExecutionContext, ExecutionBudget } from "./context/context.ts";
 import { StateManager } from "./state/state.ts";
 import { ExecutionTracer } from "./trace/tracer.ts";
 import { EventManager } from "./events/events.ts";
@@ -52,6 +52,19 @@ export type RuntimeEnvironment = "frontend" | "backend";
 
 export interface LogicEngineOptions {
   trace?: boolean;
+  /**
+   * Expression-evaluation resource limits (audit F6). Defaults: maxNodes 10000,
+   * maxDepth 100, maxCollectionItems 100000, maxStringLength 1000000.
+   * Shared across one execution's nested expressions and nested flows.
+   */
+  evaluation?: { maxNodes?: number; maxDepth?: number; maxCollectionItems?: number; maxStringLength?: number };
+  /**
+   * Policy for unknown top-level envelope fields (audit F7):
+   * "allow" (default) | "strip" | "reject".
+   */
+  additionalProperties?: "allow" | "strip" | "reject";
+  /** How long dispose() waits for active executions to settle (default 5000ms). */
+  shutdownTimeoutMs?: number;
   /** Max total retained trace events (default 1000); oldest are dropped, `tracer.truncated` is set. */
   traceMaxEvents?: number;
   /** Max retained trace events per execution (default 250). */
@@ -136,6 +149,13 @@ export class LogicEngine {
   private compiledFlows = new Map<string, CompiledFlow>();
   private grantedCapabilities = new Set<string>();
   private executionListeners = new Set<ExecutionListener>();
+  private activeControllers = new Set<AbortController>();
+
+  /** Expression-evaluation budget applied to every execution context. */
+  readonly evaluationBudget: EvaluationBudget;
+  /** Policy for unknown envelope fields at load time. */
+  readonly additionalPropertiesPolicy: "allow" | "strip" | "reject";
+  private readonly shutdownTimeoutMs: number;
   private executions = new Map<string, ExecutionStatusEvent>();
   private projectId?: string;
   private disposed = false;
@@ -150,6 +170,16 @@ export class LogicEngine {
       maxEvents: opts.traceMaxEvents,
       maxEventsPerExecution: opts.traceMaxEventsPerExecution,
     });
+    const ev = opts.evaluation ?? {};
+    this.evaluationBudget = {
+      remainingNodes: ev.maxNodes ?? 10000,
+      maxNodes: ev.maxNodes ?? 10000,
+      maxDepth: ev.maxDepth ?? 100,
+      maxCollectionItems: ev.maxCollectionItems ?? 100000,
+      maxStringLength: ev.maxStringLength ?? 1000000,
+    };
+    this.additionalPropertiesPolicy = opts.additionalProperties ?? "allow";
+    this.shutdownTimeoutMs = opts.shutdownTimeoutMs ?? 5000;
     this.functionExecutor = new FunctionExecutor(this.functions, this);
     this.methodExecutor = new MethodExecutor(this.classes, this.functionExecutor, this);
     this.hooks = new HookEngine(this);
@@ -158,6 +188,32 @@ export class LogicEngine {
 
   newExecutionId(): string {
     return newId();
+  }
+
+  /** @internal Used by FlowEngine so dispose() can abort active executions. */
+  trackController(ac: AbortController): void {
+    this.activeControllers.add(ac);
+  }
+
+  /** @internal */
+  untrackController(ac: AbortController): void {
+    this.activeControllers.delete(ac);
+  }
+
+  /**
+   * Centralized context cleanup (audit F2). Disposes execution-owned class
+   * instances exactly once, preserves engine-owned singletons, clears scopes
+   * and variables, and is idempotent. Every entry point that creates a
+   * context must release it through this method.
+   */
+  disposeContext(ctx: ExecutionContext): void {
+    if (ctx.cleanedUp) return;
+    ctx.cleanedUp = true;
+    for (const instance of [...ctx.instances.values()]) {
+      this.classes.dispose(instance);
+    }
+    ctx.instances.clear();
+    this.disposeContext(ctx);
   }
 
   // ------------------------------------------------------------------
@@ -218,6 +274,7 @@ export class LogicEngine {
     const staged = new Map(this.allDefs);
     const accepted: AnySpec[] = [];
     for (const def of list) {
+      applyEnvelopePolicy(def, this.additionalPropertiesPolicy);
       assertValidDefinition(def);
       if (staged.has(def.id)) {
         throw new VdsError(ErrorCodes.SPEC_INVALID, `Duplicate definition id "${def.id}"`);
@@ -349,8 +406,10 @@ export class LogicEngine {
     environment?: Record<string, unknown>;
     nodeBudget?: number;
     budget?: ExecutionBudget;
+    evaluationBudget?: EvaluationBudget;
   } = {}): ExecutionContext {
     return this.contextManager.create({
+      evaluationBudget: opts.evaluationBudget ? { ...opts.evaluationBudget } : undefined,
       executionId: opts.executionId ?? this.newExecutionId(),
       ...(this.projectId !== undefined ? { projectId: this.projectId } : {}),
       ...(opts.flowId !== undefined ? { flowId: opts.flowId } : {}),
@@ -387,6 +446,7 @@ export class LogicEngine {
     args: Record<string, unknown> = {},
     opts: { signal?: AbortSignal; user?: Record<string, unknown>; environment?: Record<string, unknown> } = {},
   ): Promise<ExecutionResult> {
+    this.assertNotDisposed();
     const startedAt = Date.now();
     const executionId = this.newExecutionId();
     const ctx = this.createContext({
@@ -403,7 +463,7 @@ export class LogicEngine {
       const err = normalizeError(e);
       return fail(toResultError(err), executionId, Date.now() - startedAt);
     } finally {
-      this.contextManager.dispose(ctx);
+      this.disposeContext(ctx);
     }
   }
 
@@ -421,7 +481,7 @@ export class LogicEngine {
     try {
       return await this.functionExecutor.call(id, args, context, instance);
     } finally {
-      this.contextManager.dispose(context);
+      this.disposeContext(context);
     }
   }
 
@@ -432,6 +492,7 @@ export class LogicEngine {
     args: Record<string, unknown> = {},
     opts: { signal?: AbortSignal; user?: Record<string, unknown> } = {},
   ): Promise<ExecutionResult> {
+    this.assertNotDisposed();
     const startedAt = Date.now();
     const executionId = this.newExecutionId();
     const ctx = this.createContext({ executionId, input: args, signal: opts.signal, user: opts.user });
@@ -442,7 +503,7 @@ export class LogicEngine {
       const err = normalizeError(e);
       return fail(toResultError(err), executionId, Date.now() - startedAt);
     } finally {
-      this.contextManager.dispose(ctx);
+      this.disposeContext(ctx);
     }
   }
 
@@ -459,12 +520,13 @@ export class LogicEngine {
     try {
       return await this.methodExecutor.invoke(classId, method, args, context);
     } finally {
-      this.contextManager.dispose(context);
+      this.disposeContext(context);
     }
   }
 
   /** Execute a JSON-defined flow; returns the standard ExecutionResult. */
   executeFlow(flowId: string, opts: ExecuteFlowOptions = {}): Promise<ExecutionResult> {
+    this.assertNotDisposed();
     return this.flowEngine.execute(flowId, opts);
   }
 
@@ -474,6 +536,7 @@ export class LogicEngine {
    * listeners. Event names are formal contracts when strictEvents is on.
    */
   async dispatch(event: string, payload: unknown, ctx?: ExecutionContext): Promise<unknown> {
+    this.assertNotDisposed();
     const def = this.findEventDef(event);
     const contract = def?.definition.payload;
     if (Array.isArray(contract) && contract.length > 0) {
@@ -586,11 +649,36 @@ export class LogicEngine {
     }
   }
 
-  /** Dispose singleton class instances and clear listeners. */
-  dispose(): void {
+  /**
+   * Engine shutdown lifecycle (audit F2): mark disposed (rejecting new work),
+   * abort active executions, wait up to shutdownTimeoutMs for them to settle,
+   * then dispose execution instances and singletons and clear listeners/caches.
+   * The synchronous part happens immediately; the returned promise resolves
+   * once active executions have settled (or the deadline passed).
+   */
+  dispose(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
     this.disposed = true;
-    this.classes.disposeAll();
-    this.executionListeners.clear();
-    this.events.clear();
+    const reason = new VdsError(ErrorCodes.EXEC_CANCELLED, "Engine disposed");
+    for (const ac of [...this.activeControllers]) {
+      try {
+        ac.abort(reason);
+      } catch {
+        // already aborted
+      }
+    }
+    const settle = async (): Promise<void> => {
+      const deadline = Date.now() + this.shutdownTimeoutMs;
+      while (this.activeControllers.size > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+    return settle().then(() => {
+      this.classes.disposeAll();
+      this.executionListeners.clear();
+      this.events.clear();
+      this.compiledFlows.clear();
+      this.tracer.clear();
+    });
   }
 }

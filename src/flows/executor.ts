@@ -14,7 +14,7 @@ import { checkType, typeOf } from "../spec/check.ts";
 import { fail, ok } from "../result.ts";
 import type { ExecutionResult } from "../result.ts";
 import type { FlowSpec } from "../spec/types.ts";
-import type { ExecutionContext, ExecutionBudget } from "../context/context.ts";
+import type { ExecutionContext, EvaluationBudget, ExecutionBudget } from "../context/context.ts";
 import type { LogicEngine } from "../engine.ts";
 import type { CompiledNode } from "./compiler.ts";
 
@@ -29,6 +29,8 @@ export interface ExecuteFlowOptions {
   trace?: boolean;
   /** Shared execution budget (used for nested flows / event-driven handlers). */
   budget?: ExecutionBudget;
+  /** Shared expression-evaluation budget (propagated to nested flows). */
+  evaluationBudget?: EvaluationBudget;
 }
 
 type FlowOutcome = { kind: "continue" } | { kind: "return"; value: unknown };
@@ -52,9 +54,14 @@ export class FlowEngine {
 
     // ---- cancellation + timeout ----
     const ac = new AbortController();
+    this.engine.trackController(ac);
+    // F4: the parent-signal listener is removed in finally so repeated nested
+    // flows never accumulate listeners on the parent signal.
+    let onParentAbort: (() => void) | undefined;
     if (opts.signal) {
-      if (opts.signal.aborted) ac.abort(opts.signal.reason);
-      else opts.signal.addEventListener("abort", () => ac.abort(opts.signal!.reason), { once: true });
+      onParentAbort = () => ac.abort(opts.signal!.reason);
+      if (opts.signal.aborted) onParentAbort();
+      else opts.signal.addEventListener("abort", onParentAbort, { once: true });
     }
 
     let flow: FlowSpec | undefined;
@@ -90,6 +97,8 @@ export class FlowEngine {
         signal: ac.signal,
         parentExecutionId: opts.parentExecutionId,
         budget,
+        // F6: the evaluation budget is shared with nested flows/expressions.
+        evaluationBudget: opts.evaluationBudget ? { ...opts.evaluationBudget } : undefined,
         // F-08: a flow's own maxNodeExecutions is a LOCAL limit; the strictest
         // of the shared inherited budget and this local limit is enforced.
         nodeBudget: flow.definition.limits?.maxNodeExecutions ?? DEFAULT_NODE_BUDGET,
@@ -128,23 +137,41 @@ export class FlowEngine {
                   : String(ac.signal.reason ?? ""),
             });
       }
-      // flow-level onError handlers run with `error` in scope; their own
-      // failures are traced but never mask the original error.
-      if (flow && ctx && flow.definition.onError && flow.definition.onError.length > 0) {
-        try {
-          const compiled = this.engine.getCompiledFlow(flowId);
-          cm.pushScope(ctx);
-          cm.setLocal(ctx, "error", { code: err.code, message: err.message, details: err.details });
-          await this.runNodes(compiled.onError ?? [], ctx, compiled);
-        } catch (handlerErr) {
-          this.engine.tracer.record({
-            executionId,
-            kind: "error",
-            ref: `${flowId}#onError`,
-            error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
-          });
-        } finally {
-          cm.popScope(ctx);
+      // Lifecycle handlers (audit §3): onError for ordinary failures;
+      // onCancel/onTimeout for cancellation/timeout; onFinally always.
+      // Cancel/timeout handlers run with a FRESH cleanup signal so an aborted
+      // original signal does not block cleanup work; they still share the
+      // execution budget and can never restart normal business execution.
+      if (flow && ctx) {
+        const compiled = this.engine.getCompiledFlow(flowId);
+        const isTimeout = err.code === ErrorCodes.EXEC_TIMEOUT;
+        const isCancel = err.code === ErrorCodes.EXEC_CANCELLED;
+        const handlers: Array<{ nodes: CompiledNode[] | undefined; label: string; cleanupSignal: boolean }> = [];
+        if (!isCancel && !isTimeout) handlers.push({ nodes: compiled.onError, label: "onError", cleanupSignal: false });
+        if (isCancel) handlers.push({ nodes: compiled.onCancel, label: "onCancel", cleanupSignal: true });
+        if (isTimeout) handlers.push({ nodes: compiled.onTimeout, label: "onTimeout", cleanupSignal: true });
+        handlers.push({ nodes: compiled.onFinally, label: "onFinally", cleanupSignal: isCancel || isTimeout });
+        for (const h of handlers) {
+          if (!h.nodes || h.nodes.length === 0) continue;
+          const cleanupAc = h.cleanupSignal ? new AbortController() : undefined;
+          const prevSignal = ctx.signal;
+          try {
+            cm.pushScope(ctx);
+            cm.setLocal(ctx, "error", { code: err.code, message: err.message, details: err.details });
+            if (cleanupAc) ctx.signal = cleanupAc.signal;
+            await this.runNodes(h.nodes, ctx, compiled);
+          } catch (handlerErr) {
+            // handler failures are traced but never mask the original error
+            this.engine.tracer.record({
+              executionId,
+              kind: "error",
+              ref: `${flowId}#${h.label}`,
+              error: handlerErr instanceof Error ? handlerErr.message : String(handlerErr),
+            });
+          } finally {
+            ctx.signal = prevSignal;
+            cm.popScope(ctx);
+          }
         }
       }
       const result = fail(
@@ -162,11 +189,12 @@ export class FlowEngine {
       return result;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
-      if (ctx) {
-        // dispose execution-scoped class instances
-        for (const instance of ctx.instances.values()) this.engine.disposeInstance(instance);
-        cm.dispose(ctx);
-      }
+      // F4: always remove the parent-signal listener.
+      if (opts.signal && onParentAbort) opts.signal.removeEventListener("abort", onParentAbort);
+      this.engine.untrackController(ac);
+      // F2: centralized, idempotent context cleanup (disposes execution-owned
+      // class instances exactly once, preserves singletons, clears scopes).
+      if (ctx) this.engine.disposeContext(ctx);
     }
   }
 
@@ -178,6 +206,7 @@ export class FlowEngine {
       engine: this.engine,
       ctx,
       current: ctx.current,
+      budget: ctx.evaluationBudget,
     };
   }
 
@@ -360,6 +389,7 @@ export class FlowEngine {
           signal: ctx.signal,
           parentExecutionId: ctx.executionId,
           budget: ctx.budget, // shared budget across the execution tree
+          evaluationBudget: ctx.evaluationBudget, // shared expression budget
           // F-04: inherit explicitly permitted context namespaces
           user: ctx.user,
           environment: ctx.environment,
