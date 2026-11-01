@@ -4,7 +4,8 @@
  */
 
 import { ErrorCodes, VdsError } from "../errors.ts";
-import { isValidId } from "./check.ts";
+import { checkType, isValidId } from "./check.ts";
+import { isDangerousSegment } from "../logic/paths.ts";
 import { operatorNames } from "../logic/operators.ts";
 import type {
   AnySpec,
@@ -54,10 +55,21 @@ export function validateParamsShape(
       return;
     }
     if (typeof p.name !== "string" || !p.name) issue(list, pp, "SCHEMA", `${pp}.name is required`);
+    else if (isDangerousSegment(p.name)) issue(list, pp, "SCHEMA", `${pp}.name "${p.name}" is a dangerous property name`);
     else if (names.has(p.name)) issue(list, pp, "SCHEMA", `${pp}.name "${p.name}" is duplicated`);
     else names.add(p.name as string);
     if (typeof p.type !== "string" || !JSON_TYPE_NAMES.includes(p.type as never)) {
       issue(list, pp, "SCHEMA", `${pp}.type must be one of ${JSON_TYPE_NAMES.join(", ")}`);
+    } else {
+      // F7: default and enum values must match the declared type
+      if (p.default !== undefined && !checkType(p.default, p.type as never, (p.nullable as boolean | undefined) ?? false))
+        issue(list, pp, "SCHEMA", `${pp}.default does not match declared type "${p.type}"`);
+      if (Array.isArray(p.enum)) {
+        for (const [ei, ev] of p.enum.entries()) {
+          if (!checkType(ev, p.type as never, (p.nullable as boolean | undefined) ?? false))
+            issue(list, pp, "SCHEMA", `${pp}.enum[${ei}] does not match declared type "${p.type}"`);
+        }
+      }
     }
     if (p.required !== undefined && typeof p.required !== "boolean")
       issue(list, pp, "SCHEMA", `${pp}.required must be boolean`);
@@ -92,6 +104,29 @@ export function validateExpression(expr: unknown, path: string, list: Validation
   for (const k of Object.keys(obj)) validateExpression(obj[k], `${path}.${k}`, list);
 }
 
+const ENVELOPE_KEYS = new Set([
+  "id", "name", "type", "version", "spec_version", "description", "execution", "inputs", "outputs", "definition",
+]);
+
+/**
+ * Apply the engine's additionalProperties policy to a spec envelope's
+ * top-level fields (audit F7): "allow" (default) does nothing, "strip"
+ * removes undeclared fields, "reject" throws SPEC_INVALID.
+ */
+export function applyEnvelopePolicy(def: SpecEnvelope, policy: "allow" | "strip" | "reject"): void {
+  if (policy === "allow") return;
+  const unknown = Object.keys(def).filter((k) => !ENVELOPE_KEYS.has(k));
+  if (unknown.length === 0) return;
+  if (policy === "reject") {
+    throw new VdsError(
+      ErrorCodes.SPEC_INVALID,
+      `definition "${def.id}" has unknown top-level field(s): ${unknown.join(", ")} (additionalProperties: "reject")`,
+      { id: def.id, unknownFields: unknown },
+    );
+  }
+  for (const k of unknown) delete (def as unknown as Record<string, unknown>)[k];
+}
+
 export function validateEnvelope(def: unknown): ValidationIssue[] {
   const list: ValidationIssue[] = [];
   if (!isObject(def)) {
@@ -119,6 +154,10 @@ export function validateEnvelope(def: unknown): ValidationIssue[] {
         issue(list, "$.execution.target", "SCHEMA", "target must be frontend|backend|shared");
       if (ex.mode !== undefined && !["sync", "async"].includes(ex.mode as string))
         issue(list, "$.execution.mode", "SCHEMA", "mode must be sync|async");
+      if (ex.capabilities !== undefined) {
+        if (!Array.isArray(ex.capabilities) || ex.capabilities.some((c) => typeof c !== "string" || c.length === 0))
+          issue(list, "$.execution.capabilities", "SCHEMA", "capabilities must be an array of non-empty strings");
+      }
     }
   }
   validateParamsShape(def.inputs, "$.inputs", list);
@@ -192,6 +231,9 @@ function validateClassDefinition(d: unknown, path: string, list: ValidationIssue
         else names.add(m.name);
         if (!isValidId(m.function) && !isValidId(m.flow))
           issue(list, pp, "REF", "method must reference a function or a flow");
+        else if (isValidId(m.function) && isValidId(m.flow))
+          // F7: exactly one implementation — runtime would silently prefer function
+          issue(list, pp, "SCHEMA", "method must reference exactly one of function or flow, not both");
         validateParamsShape(m.parameters, `${pp}.parameters`, list);
       });
     }
@@ -231,8 +273,10 @@ function validateHookDefinition(d: unknown, path: string, list: ValidationIssue[
   if (d.execution !== undefined) {
     const ex = d.execution;
     if (!isObject(ex)) issue(list, `${path}.execution`, "SCHEMA", "execution must be an object");
-    else if (ex.mode !== undefined && !["sequential", "parallel"].includes(ex.mode as string))
-      issue(list, `${path}.execution.mode`, "SCHEMA", "mode must be sequential|parallel");
+    else if (ex.mode !== undefined && ex.mode !== "sequential")
+      // F3: parallel hook execution is not supported in v0.x (shared-context
+      // data race) — rejected at load time; use sequential.
+      issue(list, `${path}.execution.mode`, "SCHEMA", 'mode must be "sequential" (parallel is not supported yet)');
   }
 }
 
@@ -357,8 +401,24 @@ function validateFlowDefinition(d: unknown, path: string, list: ValidationIssue[
   validateParamsShape(d.returns !== undefined ? [d.returns] : undefined, `${path}.returns`, list);
   validateNodeList(d.nodes, `${path}.nodes`, list);
   if (d.onError !== undefined) validateNodeList(d.onError, `${path}.onError`, list, { allowEmpty: true });
-  if (d.limits !== undefined && !isObject(d.limits))
-    issue(list, `${path}.limits`, "SCHEMA", "limits must be an object");
+  if (d.onCancel !== undefined) validateNodeList(d.onCancel, `${path}.onCancel`, list, { allowEmpty: true });
+  if (d.onTimeout !== undefined) validateNodeList(d.onTimeout, `${path}.onTimeout`, list, { allowEmpty: true });
+  if (d.onFinally !== undefined) validateNodeList(d.onFinally, `${path}.onFinally`, list, { allowEmpty: true });
+  if (d.limits !== undefined) {
+    if (!isObject(d.limits)) issue(list, `${path}.limits`, "SCHEMA", "limits must be an object");
+    else {
+      const l = d.limits;
+      if (l.maxNodeExecutions !== undefined &&
+          (!Number.isInteger(l.maxNodeExecutions) || (l.maxNodeExecutions as number) <= 0))
+        issue(list, `${path}.limits.maxNodeExecutions`, "SCHEMA", "maxNodeExecutions must be a positive integer");
+      if (l.maxIterations !== undefined &&
+          (!Number.isInteger(l.maxIterations) || (l.maxIterations as number) <= 0))
+        issue(list, `${path}.limits.maxIterations`, "SCHEMA", "maxIterations must be a positive integer");
+      if (l.timeoutMs !== undefined &&
+          (typeof l.timeoutMs !== "number" || !Number.isFinite(l.timeoutMs) || l.timeoutMs <= 0 || l.timeoutMs > 86400000))
+        issue(list, `${path}.limits.timeoutMs`, "SCHEMA", "timeoutMs must be a positive number of milliseconds (max 24h)");
+    }
+  }
 }
 
 function validateEventDefinition(d: unknown, path: string, list: ValidationIssue[]): void {

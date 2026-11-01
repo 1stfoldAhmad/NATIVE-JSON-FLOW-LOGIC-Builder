@@ -1,8 +1,9 @@
 /**
  * Hook engine: JSON-defined lifecycle/event hooks. dispatch() runs matching
- * handlers in order with a defined error policy (stopOnError) and execution
- * mode (sequential | parallel). Distinct from React hooks — the Expo adapter
- * exposes these through actual React hooks.
+ * handlers SEQUENTIALLY in declared order (parallel execution is rejected at
+ * load time in v0.x — sharing one execution context across concurrent handlers
+ * would be a data race; audit F3). Distinct from React hooks — the Expo
+ * adapter exposes these through actual React hooks.
  */
 
 import { normalizeError, VdsError, ErrorCodes } from "../errors.ts";
@@ -51,7 +52,6 @@ export class HookEngine {
     const hooks = this.matching(event);
     const results: HandlerResult[] = [];
     for (const hook of hooks) {
-      const mode = hook.definition.execution?.mode ?? "sequential";
       const stopOnError = hook.definition.execution?.stopOnError ?? true;
       const handlers = hook.definition.handlers;
       const runOne = async (handler: HookHandler, index: number): Promise<HandlerResult> => {
@@ -68,34 +68,21 @@ export class HookEngine {
           };
         }
       };
-      let batch: HandlerResult[];
-      if (mode === "parallel") {
-        batch = await Promise.all(handlers.map((h, i) => runOne(h, i)));
-      } else {
-        batch = [];
-        for (let i = 0; i < handlers.length; i++) {
-          const r = await runOne(handlers[i]!, i);
-          batch.push(r);
-          if (!r.ok && stopOnError) {
-            results.push(...batch);
-            throw new VdsError(r.error!.code, r.error!.message, {
-              ...(r.error!.details as object | undefined),
-              hook: hook.id,
-              handlerIndex: i,
-            });
-          }
-        }
-      }
-      results.push(...batch);
-      if (mode === "parallel" && stopOnError) {
-        const firstErr = results.find((r) => r.hook === hook.id && !r.ok);
-        if (firstErr) {
-          throw new VdsError(firstErr.error!.code, firstErr.error!.message, {
-            ...(firstErr.error!.details as object | undefined),
+      // Sequential only, in declared order — deterministic aggregation.
+      const batch: HandlerResult[] = [];
+      for (let i = 0; i < handlers.length; i++) {
+        const r = await runOne(handlers[i]!, i);
+        batch.push(r);
+        if (!r.ok && stopOnError) {
+          results.push(...batch);
+          throw new VdsError(r.error!.code, r.error!.message, {
+            ...(r.error!.details as object | undefined),
             hook: hook.id,
+            handlerIndex: i,
           });
         }
       }
+      results.push(...batch);
     }
     return results;
   }

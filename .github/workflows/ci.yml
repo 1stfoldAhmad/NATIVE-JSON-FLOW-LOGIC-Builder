@@ -50,3 +50,30 @@ jobs:
 
       - name: Demo
         run: npm run demo
+
+  # Bundle the Expo example app with Metro — proves the core + ./expo adapter
+  # actually compile under Metro (the device-verification steps in
+  # examples/expo-app/README.md still run on a device/emulator).
+  expo-bundle:
+    name: expo-bundle (Metro export of examples/expo-app)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build the library (the app links it via file:../..)
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install example app deps
+        run: npm ci --prefix examples/expo-app || npm install --prefix examples/expo-app
+        working-directory: examples/expo-app
+
+      - name: Metro export (web bundle)
+        run: npx expo export --platform web --output-dir dist-web
+        working-directory: examples/expo-app

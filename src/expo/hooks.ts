@@ -76,7 +76,14 @@ export function useFlow(flowId: string): FlowHandle {
     abortRef.current?.abort();
   }, []);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  // F8: the flow id is part of the hook's state identity — on change, abort the
+  // previous execution, invalidate its in-flight result and reset state.
+  useEffect(() => {
+    abortRef.current?.abort();
+    execCounter.current += 1; // stale executions of the previous flow can no longer set state
+    setState({ loading: false, error: null, result: undefined, executionId: null });
+    return () => abortRef.current?.abort();
+  }, [flowId]);
 
   return { execute, cancel, ...state };
 }
@@ -128,9 +135,14 @@ export function useExecution(executionId: string | null): FlowState | null {
     return tracked ? toFlowState(tracked) : null;
   });
   useEffect(() => {
-    if (!executionId) return;
+    // F8: null/unknown execution id clears the previous state instead of
+    // leaving it visible.
+    if (!executionId) {
+      setState(null);
+      return;
+    }
     const tracked = engine.getExecution(executionId);
-    if (tracked) setState(toFlowState(tracked));
+    setState(tracked ? toFlowState(tracked) : null);
     return engine.subscribeExecutions((e) => {
       if (e.executionId === executionId) setState(toFlowState(e));
     });

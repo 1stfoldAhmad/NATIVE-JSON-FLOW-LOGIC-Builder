@@ -27,6 +27,15 @@ export interface ClassInstance {
   /** Injected dependency instances keyed by their class id. */
   services: Record<string, ClassInstance>;
   disposed: boolean;
+  /**
+   * Explicit ownership (audit F1): who disposes this instance.
+   *  - "engine"  for singletons (engine shutdown only)
+   *  - "context" for execution-scoped instances (end of execution)
+   *  - the creating ClassInstance for transient dependencies
+   * Dependencies are otherwise BORROWED references and are never disposed
+   * by a dependent.
+   */
+  owner?: ClassInstance | "engine" | "context";
 }
 
 /** Deep-clone a JSON default so instances never share mutable references. */
@@ -85,7 +94,11 @@ export class ClassRegistry {
     for (const p of def.definition.properties ?? []) {
       properties[p.name] = p.default !== undefined ? cloneDefault(p.default) : null;
     }
-    const services: Record<string, ClassInstance> = {};
+    const instance: ClassInstance = { classId, lifetime, properties, services: {}, disposed: false };
+    // stamp the lifetime owner on every instance (not just injected deps)
+    if (lifetime === "singleton") instance.owner = "engine";
+    else if (lifetime === "execution") instance.owner = "context";
+    // transient instances are owned by their creator/caller (undefined here)
     for (const depId of def.definition.dependencies ?? []) {
       const depInstance = await this.createInstance(depId, engine, ctx);
       if (depInstance.disposed) {
@@ -97,25 +110,30 @@ export class ClassRegistry {
           { from: classId, ref: depId },
         );
       }
-      services[depId] = depInstance;
+      // Explicit ownership: the dependency is disposed by its lifetime owner,
+      // not by this dependent. Only transient deps are owned by the creator.
+      if (depInstance.lifetime === "transient") depInstance.owner = instance;
+      else if (depInstance.lifetime === "execution") depInstance.owner = "context";
+      else depInstance.owner = "engine";
+      instance.services[depId] = depInstance;
     }
-    const instance: ClassInstance = { classId, lifetime, properties, services, disposed: false };
     if (lifetime === "singleton") this.singletons.set(classId, instance);
     if (lifetime === "execution" && ctx) ctx.instances.set(classId, instance);
     return instance;
   }
 
   /**
-   * Dispose an instance and only the dependencies it OWNS. Singleton
-   * dependencies are engine-owned and are NEVER disposed by a dependent —
-   * disposing a transient/execution instance must not invalidate a shared
-   * singleton. Singletons are only disposed via disposeAll() (engine shutdown).
+   * Dispose an instance and only the dependencies it OWNS (explicit `owner`
+   * tracking — audit F1). Borrowed dependencies (singletons owned by the
+   * engine, execution-scoped instances owned by the execution context) are
+   * NEVER disposed by a dependent: disposing a transient must not kill an
+   * execution-scoped service cached for the rest of the flow.
    */
   dispose(instance: ClassInstance): void {
     if (instance.disposed) return;
     instance.disposed = true;
     for (const dep of Object.values(instance.services)) {
-      if (dep.lifetime !== "singleton") this.dispose(dep);
+      if (dep.owner === instance) this.dispose(dep);
     }
     if (this.singletons.get(instance.classId) === instance) {
       this.singletons.delete(instance.classId);

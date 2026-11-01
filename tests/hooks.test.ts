@@ -73,20 +73,35 @@ test("stopOnError=false collects errors and continues", async () => {
   assert.deepEqual(calls, ["still-ran"]);
 });
 
-test("parallel mode runs all handlers", async () => {
+test("parallel mode is rejected at load time (sequential only — audit F3)", () => {
+  const { engine } = engineWithRecorder();
+  assert.throws(
+    () =>
+      engine.load(
+        hook("hook.par", {
+          trigger: { event: "go" },
+          handlers: [{ type: "function", ref: "function.rec.push", args: { v: "a" } }],
+          execution: { mode: "parallel", stopOnError: false },
+        }),
+      ),
+    (e: unknown) => (e as { code: string }).code === "SPEC_INVALID",
+  );
+});
+
+test("sequential mode runs all handlers in declared order", async () => {
   const { engine, calls } = engineWithRecorder();
   engine.load(
-    hook("hook.par", {
+    hook("hook.seq", {
       trigger: { event: "go" },
       handlers: [
         { type: "function", ref: "function.rec.push", args: { v: "a" } },
         { type: "function", ref: "function.rec.push", args: { v: "b" } },
       ],
-      execution: { mode: "parallel", stopOnError: false },
+      execution: { mode: "sequential", stopOnError: false },
     }),
   );
   await engine.dispatch("go", {});
-  assert.deepEqual([...calls].sort(), ["a", "b"]);
+  assert.deepEqual(calls, ["a", "b"]);
 });
 
 test("flow handler executes the referenced flow with event+payload", async () => {

@@ -126,7 +126,7 @@ export interface MethodDef {
 
 export interface ClassDefinition {
   serviceType?: string;
-  lifetime?: "singleton" | "instance";
+  lifetime?: "singleton" | "execution" | "transient" | "instance"; // "instance" = deprecated alias of "transient"
   properties?: PropertyDef[];
   methods?: MethodDef[];
   /** Class IDs injected as dependencies. */
@@ -300,6 +300,12 @@ export interface FlowDefinition {
   returns?: ParameterDef;
   nodes: FlowNode[];
   onError?: FlowNode[];
+  /** Runs when execution is cancelled (EXEC_CANCELLED). Not run for other errors. */
+  onCancel?: FlowNode[];
+  /** Runs when execution times out (EXEC_TIMEOUT). Not run for other errors. */
+  onTimeout?: FlowNode[];
+  /** Always runs (success, error, cancel, timeout) in a cleanup scope with a fresh signal. */
+  onFinally?: FlowNode[];
   limits?: FlowLimits;
 }
 

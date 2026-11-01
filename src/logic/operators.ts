@@ -44,6 +44,14 @@ function arr(ctx: OpContext, i: number): unknown[] {
   if (!Array.isArray(v)) {
     fail(`operator expected an array at argument ${i}, got ${typeof v}`, { value: v });
   }
+  // Audit F6: collection-processing operators are bounded by the evaluation budget.
+  const b = ctx.env.budget;
+  if (b && v.length > b.maxCollectionItems) {
+    throw new VdsError(ErrorCodes.EVAL_LIMIT, `collection of ${v.length} items exceeds maxCollectionItems ${b.maxCollectionItems}`, {
+      length: v.length,
+      maxCollectionItems: b.maxCollectionItems,
+    });
+  }
   return v;
 }
 

@@ -13,6 +13,19 @@ import type { LogicEngine } from "../engine.ts";
 import type { ExecutionTracer } from "../trace/tracer.ts";
 import type { ClassInstance } from "../classes/registry.ts";
 
+/**
+ * Resource limits for expression evaluation (audit F6). Independent of the
+ * flow-node budget: map/filter/reduce over huge arrays or deeply nested
+ * expressions must not exhaust CPU/memory without spending node budget.
+ */
+export interface EvaluationBudget {
+  remainingNodes: number;
+  maxNodes: number;
+  maxDepth: number;
+  maxCollectionItems: number;
+  maxStringLength: number;
+}
+
 /** Shared execution budget — propagated to nested flows and event-driven hooks. */
 export interface ExecutionBudget {
   remaining: number;
@@ -64,6 +77,12 @@ export interface ExecutionContext {
 
   /** Stack of local scopes; the last one is the innermost. */
   scopes: Record<string, unknown>[];
+
+  /** Expression evaluation budget (shared across this execution's nested expressions). */
+  evaluationBudget: EvaluationBudget;
+
+  /** Set once engine.disposeContext(ctx) has run — makes cleanup idempotent. */
+  cleanedUp?: boolean;
 }
 
 export interface CreateContextOptions {
@@ -78,6 +97,7 @@ export interface CreateContextOptions {
   correlationId?: string;
   nodeBudget?: number;
   budget?: ExecutionBudget;
+  evaluationBudget?: EvaluationBudget;
   engine: LogicEngine;
   tracer?: ExecutionTracer;
 }
@@ -99,6 +119,10 @@ export class ContextManager {
       },
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       budget: opts.budget ?? { remaining: opts.nodeBudget ?? 10000 },
+      // clone per context: remainingNodes is mutable and must not leak across executions
+      evaluationBudget: opts.evaluationBudget
+        ? { ...opts.evaluationBudget }
+        : { ...opts.engine.evaluationBudget, remainingNodes: opts.engine.evaluationBudget.maxNodes },
       localNodeLimit: opts.nodeBudget ?? 10000,
       localSpent: 0,
       instances: new Map(),
